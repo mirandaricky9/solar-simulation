@@ -8,10 +8,12 @@
 import SwiftUI
 
 @main
-struct Solar_SimulationApp: App {
+struct SolarSimulationApp: App {
+    @StateObject private var viewModel = SimulationViewModel()
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            SolarSystemView(viewModel: viewModel)
         }
     }
 }
