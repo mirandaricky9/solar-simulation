@@ -13,9 +13,10 @@ struct SimulationViewContainer: NSViewRepresentable {
             fatalError("Metal is not supported on this Mac.")
         }
 
-        let mtkView = MTKView(frame: .zero, device: device)
+        let mtkView = InteractiveMetalView(frame: .zero, device: device)
         mtkView.colorPixelFormat = .bgra8Unorm
-        mtkView.depthStencilPixelFormat = .invalid
+        mtkView.depthStencilPixelFormat = .depth32Float
+        mtkView.clearDepth = 1.0
         mtkView.clearColor = MTLClearColor(red: 0.005, green: 0.006, blue: 0.012, alpha: 1.0)
         mtkView.preferredFramesPerSecond = 60
         mtkView.enableSetNeedsDisplay = false
@@ -24,6 +25,18 @@ struct SimulationViewContainer: NSViewRepresentable {
         let renderer = MetalRenderer(mtkView: mtkView, viewModel: viewModel)
         context.coordinator.renderer = renderer
         mtkView.delegate = renderer
+
+        mtkView.onScroll = { [weak renderer] factor in
+            renderer?.zoomBy(factor)
+        }
+
+        mtkView.onDrag = { [weak renderer] dx, dy in
+            renderer?.panBy(screenDeltaX: dx, screenDeltaY: dy)
+        }
+
+        mtkView.onResetCamera = { [weak renderer] in
+            renderer?.resetCamera()
+        }
 
         return mtkView
     }

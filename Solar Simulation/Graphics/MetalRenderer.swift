@@ -2,13 +2,15 @@ import Foundation
 import MetalKit
 import simd
 
-private struct Vertex2D {
-    var position: SIMD2<Float>
+private struct SphereVertex {
+    var position: SIMD3<Float>
+    var normal: SIMD3<Float>
 }
 
 private struct BodyInstance {
     var positionRadius: SIMD4<Float>
     var color: SIMD4<Float>
+    var material: SIMD4<Float>
 }
 
 private struct PathVertex {
@@ -18,6 +20,8 @@ private struct PathVertex {
 
 private struct Uniforms {
     var viewProjectionMatrix: simd_float4x4
+    var lightPosition: SIMD4<Float>
+    var cameraPosition: SIMD4<Float>
 }
 
 final class MetalRenderer: NSObject, MTKViewDelegate {
@@ -25,13 +29,15 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     private let commandQueue: MTLCommandQueue
     private let bodyPipelineState: MTLRenderPipelineState
     private let pathPipelineState: MTLRenderPipelineState
+    private let bodyDepthStencilState: MTLDepthStencilState
+    private let pathDepthStencilState: MTLDepthStencilState
 
     private weak var mtkView: MTKView?
     private weak var viewModel: SimulationViewModel?
 
     private var bodyVertexBuffer: MTLBuffer?
-    private var circleIndexBuffer: MTLBuffer?
-    private var circleIndexCount = 0
+    private var sphereIndexBuffer: MTLBuffer?
+    private var sphereIndexCount = 0
 
     private var bodyInstanceBuffer: MTLBuffer?
     private var bodyInstanceCount = 0
@@ -40,7 +46,32 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     private var pathVertexCount = 0
 
     private var currentBodies: [CelestialBody] = []
-    private var worldProjectionMatrix = matrix_identity_float4x4
+    private var worldViewProjectionMatrix = matrix_identity_float4x4
+    private var lightPosition = SIMD3<Float>(0, 0, 0)
+
+    private var cameraTarget = SIMD3<Float>(0, 0, 0)
+    private var cameraPosition = SIMD3<Float>(0, -72, 34)
+    private var yaw: Float = -0.65
+    private var pitch: Float = 0.48
+    private var zoom: Float = 1.0
+    private var lastFrameTime = Date()
+
+    private let baseCameraDistance: Float = 72.0
+    private let fieldOfViewRadians: Float = Float.pi / 4
+    private let orbitSensitivity: Float = 0.006
+    private let movementSpeedScale: Float = 0.35
+    private let maximumMovementDeltaTime: Float = 1.0 / 15.0
+    private let minimumPitch: Float = -1.2
+    private let maximumPitch: Float = 1.2
+
+    private var bodySizeMultiplier: Float = 1.0
+
+    private let starRenderRadius: Float = 0.55
+    private let planetMinimumRenderRadius: Float = 0.09
+    private let planetRenderScale: Float = 0.82
+    private let moonRenderRadius: Float = 0.055
+    private let asteroidRenderRadius: Float = 0.018
+    private let zoomRadiusFalloff: Float = 0.12
 
     init(mtkView: MTKView, viewModel: SimulationViewModel) {
         guard let device = mtkView.device else {
@@ -63,20 +94,14 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         }
 
         let bodyPipelineDescriptor = MTLRenderPipelineDescriptor()
-        bodyPipelineDescriptor.label = "Body Pipeline"
+        bodyPipelineDescriptor.label = "3D Body Pipeline"
         bodyPipelineDescriptor.vertexFunction = bodyVertexFunction
         bodyPipelineDescriptor.fragmentFunction = bodyFragmentFunction
         bodyPipelineDescriptor.colorAttachments[0].pixelFormat = mtkView.colorPixelFormat
-        bodyPipelineDescriptor.colorAttachments[0].isBlendingEnabled = true
-        bodyPipelineDescriptor.colorAttachments[0].rgbBlendOperation = .add
-        bodyPipelineDescriptor.colorAttachments[0].alphaBlendOperation = .add
-        bodyPipelineDescriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
-        bodyPipelineDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .sourceAlpha
-        bodyPipelineDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
-        bodyPipelineDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        bodyPipelineDescriptor.depthAttachmentPixelFormat = mtkView.depthStencilPixelFormat
 
         let pathPipelineDescriptor = MTLRenderPipelineDescriptor()
-        pathPipelineDescriptor.label = "Path Pipeline"
+        pathPipelineDescriptor.label = "3D Path Pipeline"
         pathPipelineDescriptor.vertexFunction = pathVertexFunction
         pathPipelineDescriptor.fragmentFunction = pathFragmentFunction
         pathPipelineDescriptor.colorAttachments[0].pixelFormat = mtkView.colorPixelFormat
@@ -87,6 +112,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         pathPipelineDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .sourceAlpha
         pathPipelineDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
         pathPipelineDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        pathPipelineDescriptor.depthAttachmentPixelFormat = mtkView.depthStencilPixelFormat
 
         do {
             self.bodyPipelineState = try device.makeRenderPipelineState(descriptor: bodyPipelineDescriptor)
@@ -95,15 +121,33 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             fatalError("Could not create Metal render pipeline states: \(error)")
         }
 
+        let bodyDepthDescriptor = MTLDepthStencilDescriptor()
+        bodyDepthDescriptor.depthCompareFunction = .lessEqual
+        bodyDepthDescriptor.isDepthWriteEnabled = true
+
+        guard let bodyDepthStencilState = device.makeDepthStencilState(descriptor: bodyDepthDescriptor) else {
+            fatalError("Could not create body depth stencil state.")
+        }
+
+        let pathDepthDescriptor = MTLDepthStencilDescriptor()
+        pathDepthDescriptor.depthCompareFunction = .lessEqual
+        pathDepthDescriptor.isDepthWriteEnabled = false
+
+        guard let pathDepthStencilState = device.makeDepthStencilState(descriptor: pathDepthDescriptor) else {
+            fatalError("Could not create path depth stencil state.")
+        }
+
         self.device = device
         self.commandQueue = commandQueue
+        self.bodyDepthStencilState = bodyDepthStencilState
+        self.pathDepthStencilState = pathDepthStencilState
         self.mtkView = mtkView
         self.viewModel = viewModel
 
         super.init()
 
         print("Using Metal device: \(device.name)")
-        createCircleMesh(segmentCount: 48)
+        createSphereMesh(latitudeSegments: 24, longitudeSegments: 48)
         calculateProjectionMatrix(drawableSize: mtkView.drawableSize)
         updateBodies(viewModel.bodies)
     }
@@ -114,11 +158,42 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         rebuildPathBuffer(from: bodies)
     }
 
+    func setZoom(_ newZoom: Float) {
+        zoom = min(max(newZoom, 0.35), 120.0)
+        recalculateProjectionForCurrentView()
+        rebuildBodyInstanceBuffer(from: currentBodies)
+    }
+
+    func zoomBy(_ factor: Float) {
+        setZoom(zoom * factor)
+    }
+
+    func panBy(screenDeltaX dx: Float, screenDeltaY dy: Float) {
+        orbitBy(screenDeltaX: dx, screenDeltaY: dy)
+    }
+
+    func orbitBy(screenDeltaX dx: Float, screenDeltaY dy: Float) {
+        yaw -= dx * orbitSensitivity
+        pitch = min(max(pitch + dy * orbitSensitivity, minimumPitch), maximumPitch)
+        recalculateProjectionForCurrentView()
+    }
+
+    func resetCamera() {
+        cameraTarget = SIMD3<Float>(0, 0, 0)
+        yaw = -0.65
+        pitch = 0.48
+        zoom = 1.0
+        recalculateProjectionForCurrentView()
+        rebuildBodyInstanceBuffer(from: currentBodies)
+    }
+
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
         calculateProjectionMatrix(drawableSize: size)
     }
 
     func draw(in view: MTKView) {
+        updateCameraMovement(from: view)
+
         if let latestBodies = viewModel?.bodies {
             updateBodies(latestBodies)
         }
@@ -130,51 +205,87 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             return
         }
 
-        drawPaths(encoder: encoder)
         drawBodyInstances(encoder: encoder)
+        drawPaths(encoder: encoder)
 
         encoder.endEncoding()
         commandBuffer.present(drawable)
         commandBuffer.commit()
     }
 
-    private func createCircleMesh(segmentCount: Int) {
-        var vertices: [Vertex2D] = [Vertex2D(position: SIMD2<Float>(0, 0))]
+    private func createSphereMesh(latitudeSegments: Int, longitudeSegments: Int) {
+        let latitudeSegments = max(latitudeSegments, 3)
+        let longitudeSegments = max(longitudeSegments, 3)
+        let verticesPerRow = longitudeSegments + 1
 
-        for index in 0...segmentCount {
-            let angle = Float(index) / Float(segmentCount) * Float.pi * 2
-            vertices.append(Vertex2D(position: SIMD2<Float>(cos(angle), sin(angle))))
+        var vertices: [SphereVertex] = []
+        vertices.reserveCapacity((latitudeSegments + 1) * verticesPerRow)
+
+        for latitude in 0...latitudeSegments {
+            let v = Float(latitude) / Float(latitudeSegments)
+            let theta = v * Float.pi
+            let sinTheta = sin(theta)
+            let cosTheta = cos(theta)
+
+            for longitude in 0...longitudeSegments {
+                let u = Float(longitude) / Float(longitudeSegments)
+                let phi = u * Float.pi * 2
+
+                let position = SIMD3<Float>(
+                    sinTheta * cos(phi),
+                    sinTheta * sin(phi),
+                    cosTheta
+                )
+
+                vertices.append(SphereVertex(position: position, normal: position))
+            }
         }
 
         var indices: [UInt16] = []
-        for index in 1...segmentCount {
-            indices.append(0)
-            indices.append(UInt16(index))
-            indices.append(UInt16(index + 1))
+        indices.reserveCapacity(latitudeSegments * longitudeSegments * 6)
+
+        for latitude in 0..<latitudeSegments {
+            for longitude in 0..<longitudeSegments {
+                let current = latitude * verticesPerRow + longitude
+                let next = current + verticesPerRow
+
+                indices.append(UInt16(current))
+                indices.append(UInt16(next))
+                indices.append(UInt16(current + 1))
+
+                indices.append(UInt16(current + 1))
+                indices.append(UInt16(next))
+                indices.append(UInt16(next + 1))
+            }
         }
 
-        circleIndexCount = indices.count
+        sphereIndexCount = indices.count
 
         bodyVertexBuffer = device.makeBuffer(
             bytes: vertices,
-            length: MemoryLayout<Vertex2D>.stride * vertices.count,
+            length: MemoryLayout<SphereVertex>.stride * vertices.count,
             options: .storageModeShared
         )
-        bodyVertexBuffer?.label = "Circle Vertex Buffer"
+        bodyVertexBuffer?.label = "Sphere Vertex Buffer"
 
-        circleIndexBuffer = device.makeBuffer(
+        sphereIndexBuffer = device.makeBuffer(
             bytes: indices,
             length: MemoryLayout<UInt16>.stride * indices.count,
             options: .storageModeShared
         )
-        circleIndexBuffer?.label = "Circle Index Buffer"
+        sphereIndexBuffer?.label = "Sphere Index Buffer"
     }
 
     private func rebuildBodyInstanceBuffer(from bodies: [CelestialBody]) {
+        if let star = bodies.first(where: \.isStar) {
+            lightPosition = toRenderPosition(star.position)
+        }
+
         let instances = bodies.map { body in
             BodyInstance(
                 positionRadius: SIMD4<Float>(toRenderPosition(body), visualRadius(for: body)),
-                color: body.color
+                color: body.color,
+                material: SIMD4<Float>(body.isStar ? 1 : 0, 0, 0, 0)
             )
         }
 
@@ -227,24 +338,26 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     private func drawBodyInstances(encoder: MTLRenderCommandEncoder) {
         guard let bodyVertexBuffer,
               let bodyInstanceBuffer,
-              let circleIndexBuffer,
+              let sphereIndexBuffer,
               bodyInstanceCount > 0,
-              circleIndexCount > 0 else {
+              sphereIndexCount > 0 else {
             return
         }
 
-        var uniforms = Uniforms(viewProjectionMatrix: worldProjectionMatrix)
+        var uniforms = makeUniforms()
 
         encoder.setRenderPipelineState(bodyPipelineState)
+        encoder.setDepthStencilState(bodyDepthStencilState)
         encoder.setVertexBuffer(bodyVertexBuffer, offset: 0, index: 0)
         encoder.setVertexBuffer(bodyInstanceBuffer, offset: 0, index: 1)
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 2)
+        encoder.setFragmentBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
 
         encoder.drawIndexedPrimitives(
             type: .triangle,
-            indexCount: circleIndexCount,
+            indexCount: sphereIndexCount,
             indexType: .uint16,
-            indexBuffer: circleIndexBuffer,
+            indexBuffer: sphereIndexBuffer,
             indexBufferOffset: 0,
             instanceCount: bodyInstanceCount
         )
@@ -253,12 +366,21 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     private func drawPaths(encoder: MTLRenderCommandEncoder) {
         guard let pathVertexBuffer, pathVertexCount > 0 else { return }
 
-        var uniforms = Uniforms(viewProjectionMatrix: worldProjectionMatrix)
+        var uniforms = makeUniforms()
 
         encoder.setRenderPipelineState(pathPipelineState)
+        encoder.setDepthStencilState(pathDepthStencilState)
         encoder.setVertexBuffer(pathVertexBuffer, offset: 0, index: 0)
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
         encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: pathVertexCount)
+    }
+
+    private func makeUniforms() -> Uniforms {
+        Uniforms(
+            viewProjectionMatrix: worldViewProjectionMatrix,
+            lightPosition: SIMD4<Float>(lightPosition, 1),
+            cameraPosition: SIMD4<Float>(cameraPosition, 1)
+        )
     }
 
     private func toRenderPosition(_ body: CelestialBody) -> SIMD3<Float> {
@@ -274,48 +396,114 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         )
     }
 
-    private func visualRadius(for body: CelestialBody) -> Float {
-        if body.isStar { return 0.22 }
-        if body.isAsteroid { return 0.008 }
-        if body.isMoon { return 0.018 }
+    func setBodySizeMultiplier(_ multiplier: Float) {
+        bodySizeMultiplier = min(max(multiplier, 0.25), 20.0)
+        rebuildBodyInstanceBuffer(from: currentBodies)
+    }
 
-        let scaled = Float(body.visualRadius / 700_000_000.0) * 0.32
-        return max(0.028, scaled)
+    private func visualRadius(for body: CelestialBody) -> Float {
+        let baseRadius: Float
+
+        if body.isStar {
+            baseRadius = starRenderRadius
+        } else if body.isAsteroid {
+            baseRadius = asteroidRenderRadius
+        } else if body.isMoon {
+            baseRadius = moonRenderRadius
+        } else {
+            let scaled = Float(body.visualRadius / 700_000_000.0) * planetRenderScale
+            baseRadius = max(planetMinimumRenderRadius, scaled)
+        }
+
+        return (baseRadius * bodySizeMultiplier) / pow(max(zoom, 1.0), zoomRadiusFalloff)
+    }
+
+    private func recalculateProjectionForCurrentView() {
+        guard let view = mtkView else { return }
+        calculateProjectionMatrix(drawableSize: view.drawableSize)
+    }
+
+    private func updateCameraMovement(from view: MTKView) {
+        let now = Date()
+        let deltaTime = min(max(Float(now.timeIntervalSince(lastFrameTime)), 0), maximumMovementDeltaTime)
+        lastFrameTime = now
+
+        guard let interactiveView = view as? InteractiveMetalView else { return }
+
+        let input = interactiveView.keyboardMovementInput
+        guard simd_length_squared(input) > 0 else { return }
+
+        let viewDirection = simd_normalize(cameraTarget - cameraPosition)
+        let right = simd_normalize(simd_cross(viewDirection, SIMD3<Float>(0, 0, 1)))
+        let movementDirection = simd_normalize(right * input.x + viewDirection * input.y)
+        let cameraDistance = baseCameraDistance / zoom
+        let speed = max(0.08, cameraDistance * movementSpeedScale)
+
+        cameraTarget += movementDirection * speed * deltaTime
+        calculateProjectionMatrix(drawableSize: view.drawableSize)
     }
 
     private func calculateProjectionMatrix(drawableSize: CGSize) {
         let width = max(Float(drawableSize.width), 1)
         let height = max(Float(drawableSize.height), 1)
         let aspect = width / height
-        let halfExtent: Float = 35.0
+        let distance = baseCameraDistance / zoom
+        let clampedPitch = min(max(pitch, minimumPitch), maximumPitch)
 
-        worldProjectionMatrix = orthographic(
-            left: -halfExtent * aspect,
-            right: halfExtent * aspect,
-            bottom: -halfExtent,
-            top: halfExtent,
-            near: -10,
-            far: 10
+        cameraPosition = cameraTarget + SIMD3<Float>(
+            cos(clampedPitch) * sin(yaw) * distance,
+            -cos(clampedPitch) * cos(yaw) * distance,
+            sin(clampedPitch) * distance
         )
+
+        let viewMatrix = lookAt(
+            eye: cameraPosition,
+            center: cameraTarget,
+            up: SIMD3<Float>(0, 0, 1)
+        )
+        let projectionMatrix = perspective(
+            fieldOfViewY: fieldOfViewRadians,
+            aspect: aspect,
+            near: max(0.01, distance * 0.001),
+            far: 5_000
+        )
+
+        worldViewProjectionMatrix = projectionMatrix * viewMatrix
     }
 
-    private func orthographic(
-        left: Float,
-        right: Float,
-        bottom: Float,
-        top: Float,
+    private func perspective(
+        fieldOfViewY: Float,
+        aspect: Float,
         near: Float,
         far: Float
     ) -> simd_float4x4 {
-        let rightMinusLeft = right - left
-        let topMinusBottom = top - bottom
-        let farMinusNear = far - near
+        let yScale = 1 / tan(fieldOfViewY * 0.5)
+        let xScale = yScale / aspect
+        let zScale = far / (near - far)
+        let wzScale = near * far / (near - far)
 
         return simd_float4x4(columns: (
-            SIMD4<Float>(2 / rightMinusLeft, 0, 0, 0),
-            SIMD4<Float>(0, 2 / topMinusBottom, 0, 0),
-            SIMD4<Float>(0, 0, -2 / farMinusNear, 0),
-            SIMD4<Float>(-(right + left) / rightMinusLeft, -(top + bottom) / topMinusBottom, -(far + near) / farMinusNear, 1)
+            SIMD4<Float>(xScale, 0, 0, 0),
+            SIMD4<Float>(0, yScale, 0, 0),
+            SIMD4<Float>(0, 0, zScale, -1),
+            SIMD4<Float>(0, 0, wzScale, 0)
+        ))
+    }
+
+    private func lookAt(
+        eye: SIMD3<Float>,
+        center: SIMD3<Float>,
+        up: SIMD3<Float>
+    ) -> simd_float4x4 {
+        let zAxis = simd_normalize(eye - center)
+        let xAxis = simd_normalize(simd_cross(up, zAxis))
+        let yAxis = simd_cross(zAxis, xAxis)
+
+        return simd_float4x4(columns: (
+            SIMD4<Float>(xAxis.x, yAxis.x, zAxis.x, 0),
+            SIMD4<Float>(xAxis.y, yAxis.y, zAxis.y, 0),
+            SIMD4<Float>(xAxis.z, yAxis.z, zAxis.z, 0),
+            SIMD4<Float>(-simd_dot(xAxis, eye), -simd_dot(yAxis, eye), -simd_dot(zAxis, eye), 1)
         ))
     }
 }
