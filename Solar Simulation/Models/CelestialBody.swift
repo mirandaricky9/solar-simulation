@@ -1,7 +1,7 @@
 import Foundation
 import simd
 
-struct CelestialBody: Identifiable {
+struct CelestialBody: Identifiable, Sendable {
     let id = UUID()
     let name: String
     let mass: Double

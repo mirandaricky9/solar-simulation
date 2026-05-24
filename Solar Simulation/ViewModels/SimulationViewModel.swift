@@ -12,49 +12,95 @@ final class SimulationViewModel: ObservableObject {
     @Published var showAsteroidBelt = true
     @Published private(set) var cameraResetRequestID = 0
 
-    private let simulationEngine = SimulationEngine()
-    private var timer: Timer?
+    private let simulationWorker = SimulationWorker()
+    private var simulationTask: Task<Void, Never>?
+    private var workerSyncTask: Task<Void, Never>?
+    private var accumulatedTime: Double = 0
+    private let simulationFrameIntervalNanoseconds: UInt64 = 16_666_667
+    private let publishedSnapshotInterval = 2
 
     init() {
         reset()
     }
 
     deinit {
-        timer?.invalidate()
+        simulationTask?.cancel()
+        workerSyncTask?.cancel()
     }
 
     func reset() {
-        timer?.invalidate()
-        timer = nil
+        simulationTask?.cancel()
+        simulationTask = nil
+        workerSyncTask?.cancel()
         isRunning = false
         currentTime = 0
-        bodies = Self.makeInitialBodies(includeAsteroids: showAsteroidBelt)
+        accumulatedTime = 0
+
+        let newBodies = Self.makeInitialBodies(includeAsteroids: showAsteroidBelt)
+        bodies = newBodies
         cameraResetRequestID += 1
+
+        workerSyncTask = Task { [simulationWorker] in
+            await simulationWorker.setBodies(newBodies)
+        }
     }
 
     func toggleSimulation() {
-        isRunning.toggle()
-
         if isRunning {
-            timer?.invalidate()
-            let newTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
-                Task { @MainActor in
-                    guard let self, self.isRunning else { return }
-                    self.simulateStep()
-                }
-            }
-            timer = newTimer
-            RunLoop.main.add(newTimer, forMode: .common)
+            stopSimulationLoop()
         } else {
-            timer?.invalidate()
-            timer = nil
+            isRunning = true
+            startSimulationLoop()
         }
     }
 
     func simulateStep() {
         let dt = SolarSystemConstants.baseTimeStep * timeStepMultiplier
-        simulationEngine.step(bodies: &bodies, dt: dt)
-        currentTime += dt
+
+        Task { [simulationWorker] in
+            let steppedBodies = await simulationWorker.step(dt: dt)
+
+            await MainActor.run {
+                self.accumulatedTime += dt
+                self.currentTime = self.accumulatedTime
+                self.bodies = steppedBodies
+            }
+        }
+    }
+
+    private func startSimulationLoop() {
+        simulationTask?.cancel()
+        simulationTask = Task { [weak self] in
+            var stepIndex = 0
+
+            while !Task.isCancelled {
+                guard let self else { return }
+
+                let dt = SolarSystemConstants.baseTimeStep * self.timeStepMultiplier
+                let shouldPublish = stepIndex % self.publishedSnapshotInterval == 0
+
+                if shouldPublish {
+                    let steppedBodies = await self.simulationWorker.step(dt: dt)
+                    guard !Task.isCancelled else { return }
+                    self.accumulatedTime += dt
+                    self.currentTime = self.accumulatedTime
+                    self.bodies = steppedBodies
+                } else {
+                    await self.simulationWorker.advance(dt: dt)
+                    guard !Task.isCancelled else { return }
+                    self.accumulatedTime += dt
+                }
+
+                stepIndex += 1
+                try? await Task.sleep(nanoseconds: self.simulationFrameIntervalNanoseconds)
+            }
+        }
+    }
+
+    private func stopSimulationLoop() {
+        simulationTask?.cancel()
+        simulationTask = nil
+        isRunning = false
     }
 
     static func makeInitialBodies(includeAsteroids: Bool) -> [CelestialBody] {

@@ -28,6 +28,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     private static let defaultCameraPosition = SIMD3<Float>(0, -72, 34)
     private static let defaultYaw: Float = 0
     private static let defaultPitch: Float = -0.44
+    private static let dynamicBufferCount = 3
 
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
@@ -39,15 +40,26 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     private weak var mtkView: MTKView?
     private weak var viewModel: SimulationViewModel?
 
-    private var bodyVertexBuffer: MTLBuffer?
-    private var sphereIndexBuffer: MTLBuffer?
-    private var sphereIndexCount = 0
+    private var highDetailSphereVertexBuffer: MTLBuffer?
+    private var highDetailSphereIndexBuffer: MTLBuffer?
+    private var highDetailSphereIndexCount = 0
 
-    private var bodyInstanceBuffer: MTLBuffer?
-    private var bodyInstanceCount = 0
+    private var lowDetailSphereVertexBuffer: MTLBuffer?
+    private var lowDetailSphereIndexBuffer: MTLBuffer?
+    private var lowDetailSphereIndexCount = 0
 
-    private var pathVertexBuffer: MTLBuffer?
+    private var majorBodyInstanceBuffers = Array<MTLBuffer?>(repeating: nil, count: MetalRenderer.dynamicBufferCount)
+    private var majorBodyInstanceCapacities = Array(repeating: 0, count: MetalRenderer.dynamicBufferCount)
+    private var majorBodyInstanceCount = 0
+
+    private var asteroidInstanceBuffers = Array<MTLBuffer?>(repeating: nil, count: MetalRenderer.dynamicBufferCount)
+    private var asteroidInstanceCapacities = Array(repeating: 0, count: MetalRenderer.dynamicBufferCount)
+    private var asteroidInstanceCount = 0
+
+    private var pathVertexBuffers = Array<MTLBuffer?>(repeating: nil, count: MetalRenderer.dynamicBufferCount)
+    private var pathVertexCapacities = Array(repeating: 0, count: MetalRenderer.dynamicBufferCount)
     private var pathVertexCount = 0
+    private var dynamicBufferIndex = 0
 
     private var currentBodies: [CelestialBody] = []
     private var worldViewProjectionMatrix = matrix_identity_float4x4
@@ -152,7 +164,26 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         super.init()
 
         print("Using Metal device: \(device.name)")
-        createSphereMesh(latitudeSegments: 24, longitudeSegments: 48)
+        let highDetailSphere = createSphereMesh(
+            latitudeSegments: 24,
+            longitudeSegments: 48,
+            vertexBufferLabel: "High Detail Sphere Vertex Buffer",
+            indexBufferLabel: "High Detail Sphere Index Buffer"
+        )
+        highDetailSphereVertexBuffer = highDetailSphere.vertexBuffer
+        highDetailSphereIndexBuffer = highDetailSphere.indexBuffer
+        highDetailSphereIndexCount = highDetailSphere.indexCount
+
+        let lowDetailSphere = createSphereMesh(
+            latitudeSegments: 6,
+            longitudeSegments: 12,
+            vertexBufferLabel: "Low Detail Sphere Vertex Buffer",
+            indexBufferLabel: "Low Detail Sphere Index Buffer"
+        )
+        lowDetailSphereVertexBuffer = lowDetailSphere.vertexBuffer
+        lowDetailSphereIndexBuffer = lowDetailSphere.indexBuffer
+        lowDetailSphereIndexCount = lowDetailSphere.indexCount
+
         calculateProjectionMatrix(drawableSize: mtkView.drawableSize)
         updateBodies(viewModel.bodies)
     }
@@ -199,6 +230,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
 
     func draw(in view: MTKView) {
         updateKeyboardCameraControls(from: view)
+        advanceDynamicBufferIndex()
 
         if let latestBodies = viewModel?.bodies {
             updateBodies(latestBodies)
@@ -219,7 +251,16 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         commandBuffer.commit()
     }
 
-    private func createSphereMesh(latitudeSegments: Int, longitudeSegments: Int) {
+    private func advanceDynamicBufferIndex() {
+        dynamicBufferIndex = (dynamicBufferIndex + 1) % Self.dynamicBufferCount
+    }
+
+    private func createSphereMesh(
+        latitudeSegments: Int,
+        longitudeSegments: Int,
+        vertexBufferLabel: String,
+        indexBufferLabel: String
+    ) -> (vertexBuffer: MTLBuffer, indexBuffer: MTLBuffer, indexCount: Int) {
         let latitudeSegments = max(latitudeSegments, 3)
         let longitudeSegments = max(longitudeSegments, 3)
         let verticesPerRow = longitudeSegments + 1
@@ -265,21 +306,25 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             }
         }
 
-        sphereIndexCount = indices.count
-
-        bodyVertexBuffer = device.makeBuffer(
+        guard let vertexBuffer = device.makeBuffer(
             bytes: vertices,
             length: MemoryLayout<SphereVertex>.stride * vertices.count,
             options: .storageModeShared
-        )
-        bodyVertexBuffer?.label = "Sphere Vertex Buffer"
+        ) else {
+            fatalError("Could not create sphere vertex buffer.")
+        }
+        vertexBuffer.label = vertexBufferLabel
 
-        sphereIndexBuffer = device.makeBuffer(
+        guard let indexBuffer = device.makeBuffer(
             bytes: indices,
             length: MemoryLayout<UInt16>.stride * indices.count,
             options: .storageModeShared
-        )
-        sphereIndexBuffer?.label = "Sphere Index Buffer"
+        ) else {
+            fatalError("Could not create sphere index buffer.")
+        }
+        indexBuffer.label = indexBufferLabel
+
+        return (vertexBuffer, indexBuffer, indices.count)
     }
 
     private func rebuildBodyInstanceBuffer(from bodies: [CelestialBody]) {
@@ -287,32 +332,83 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             lightPosition = toRenderPosition(star.position)
         }
 
-        let instances = bodies.map { body in
-            BodyInstance(
+        majorBodyInstanceCount = bodies.reduce(0) { $0 + ($1.isAsteroid ? 0 : 1) }
+        asteroidInstanceCount = bodies.count - majorBodyInstanceCount
+
+        Self.ensureBodyInstanceBuffer(
+            device: device,
+            buffers: &majorBodyInstanceBuffers,
+            capacities: &majorBodyInstanceCapacities,
+            bufferIndex: dynamicBufferIndex,
+            requiredCount: majorBodyInstanceCount,
+            label: "Major Body Instance Buffer"
+        )
+        Self.ensureBodyInstanceBuffer(
+            device: device,
+            buffers: &asteroidInstanceBuffers,
+            capacities: &asteroidInstanceCapacities,
+            bufferIndex: dynamicBufferIndex,
+            requiredCount: asteroidInstanceCount,
+            label: "Asteroid Instance Buffer"
+        )
+
+        let majorBodyPointer = majorBodyInstanceBuffers[dynamicBufferIndex]?.contents().bindMemory(
+            to: BodyInstance.self,
+            capacity: majorBodyInstanceCapacities[dynamicBufferIndex]
+        )
+        let asteroidPointer = asteroidInstanceBuffers[dynamicBufferIndex]?.contents().bindMemory(
+            to: BodyInstance.self,
+            capacity: asteroidInstanceCapacities[dynamicBufferIndex]
+        )
+
+        var majorBodyIndex = 0
+        var asteroidIndex = 0
+
+        for body in bodies {
+            let instance = BodyInstance(
                 positionRadius: SIMD4<Float>(toRenderPosition(body), visualRadius(for: body)),
                 color: body.color,
                 material: SIMD4<Float>(body.isStar ? 1 : 0, 0, 0, 0)
             )
+
+            if body.isAsteroid {
+                asteroidPointer?[asteroidIndex] = instance
+                asteroidIndex += 1
+            } else {
+                majorBodyPointer?[majorBodyIndex] = instance
+                majorBodyIndex += 1
+            }
         }
-
-        bodyInstanceCount = instances.count
-
-        guard !instances.isEmpty else {
-            bodyInstanceBuffer = nil
-            return
-        }
-
-        bodyInstanceBuffer = device.makeBuffer(
-            bytes: instances,
-            length: MemoryLayout<BodyInstance>.stride * instances.count,
-            options: .storageModeShared
-        )
-        bodyInstanceBuffer?.label = "Body Instance Buffer"
     }
 
     private func rebuildPathBuffer(from bodies: [CelestialBody]) {
-        var vertices: [PathVertex] = []
-        vertices.reserveCapacity(bodies.reduce(0) { $0 + max(0, $1.cumulativePosition.count - 1) * 2 })
+        let requiredVertexCount = bodies.reduce(0) { count, body in
+            guard !body.isAsteroid else { return count }
+            return count + max(0, body.cumulativePosition.count - 1) * 2
+        }
+
+        pathVertexCount = requiredVertexCount
+
+        guard requiredVertexCount > 0 else {
+            return
+        }
+
+        Self.ensurePathVertexBuffer(
+            device: device,
+            buffers: &pathVertexBuffers,
+            capacities: &pathVertexCapacities,
+            bufferIndex: dynamicBufferIndex,
+            requiredCount: requiredVertexCount
+        )
+
+        guard let pathPointer = pathVertexBuffers[dynamicBufferIndex]?.contents().bindMemory(
+            to: PathVertex.self,
+            capacity: pathVertexCapacities[dynamicBufferIndex]
+        ) else {
+            return
+        }
+
+        var vertexIndex = 0
 
         for body in bodies where !body.isAsteroid {
             guard body.cumulativePosition.count > 1 else { continue }
@@ -321,56 +417,107 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             for index in 1..<body.cumulativePosition.count {
                 let previous = body.cumulativePosition[index - 1]
                 let current = body.cumulativePosition[index]
-                vertices.append(PathVertex(position: SIMD4<Float>(toRenderPosition(previous), 1), color: pathColor))
-                vertices.append(PathVertex(position: SIMD4<Float>(toRenderPosition(current), 1), color: pathColor))
+                pathPointer[vertexIndex] = PathVertex(position: SIMD4<Float>(toRenderPosition(previous), 1), color: pathColor)
+                vertexIndex += 1
+                pathPointer[vertexIndex] = PathVertex(position: SIMD4<Float>(toRenderPosition(current), 1), color: pathColor)
+                vertexIndex += 1
             }
         }
+    }
 
-        pathVertexCount = vertices.count
+    private static func ensureBodyInstanceBuffer(
+        device: MTLDevice,
+        buffers: inout [MTLBuffer?],
+        capacities: inout [Int],
+        bufferIndex: Int,
+        requiredCount: Int,
+        label: String
+    ) {
+        guard requiredCount > 0 else { return }
+        guard buffers[bufferIndex] == nil || capacities[bufferIndex] < requiredCount else { return }
 
-        guard !vertices.isEmpty else {
-            pathVertexBuffer = nil
-            return
-        }
-
-        pathVertexBuffer = device.makeBuffer(
-            bytes: vertices,
-            length: MemoryLayout<PathVertex>.stride * vertices.count,
+        capacities[bufferIndex] = max(requiredCount, max(1, capacities[bufferIndex] * 2))
+        buffers[bufferIndex] = device.makeBuffer(
+            length: MemoryLayout<BodyInstance>.stride * capacities[bufferIndex],
             options: .storageModeShared
         )
-        pathVertexBuffer?.label = "Path Vertex Buffer"
+        buffers[bufferIndex]?.label = "\(label) \(bufferIndex)"
+    }
+
+    private static func ensurePathVertexBuffer(
+        device: MTLDevice,
+        buffers: inout [MTLBuffer?],
+        capacities: inout [Int],
+        bufferIndex: Int,
+        requiredCount: Int
+    ) {
+        guard requiredCount > 0 else { return }
+        guard buffers[bufferIndex] == nil || capacities[bufferIndex] < requiredCount else { return }
+
+        capacities[bufferIndex] = max(requiredCount, max(1, capacities[bufferIndex] * 2))
+        buffers[bufferIndex] = device.makeBuffer(
+            length: MemoryLayout<PathVertex>.stride * capacities[bufferIndex],
+            options: .storageModeShared
+        )
+        buffers[bufferIndex]?.label = "Path Vertex Buffer \(bufferIndex)"
     }
 
     private func drawBodyInstances(encoder: MTLRenderCommandEncoder) {
-        guard let bodyVertexBuffer,
-              let bodyInstanceBuffer,
-              let sphereIndexBuffer,
-              bodyInstanceCount > 0,
-              sphereIndexCount > 0 else {
-            return
-        }
-
         var uniforms = makeUniforms()
 
         encoder.setRenderPipelineState(bodyPipelineState)
         encoder.setDepthStencilState(bodyDepthStencilState)
-        encoder.setVertexBuffer(bodyVertexBuffer, offset: 0, index: 0)
-        encoder.setVertexBuffer(bodyInstanceBuffer, offset: 0, index: 1)
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 2)
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
 
+        drawInstancedBodies(
+            encoder: encoder,
+            vertexBuffer: highDetailSphereVertexBuffer,
+            indexBuffer: highDetailSphereIndexBuffer,
+            indexCount: highDetailSphereIndexCount,
+            instanceBuffer: majorBodyInstanceBuffers[dynamicBufferIndex],
+            instanceCount: majorBodyInstanceCount
+        )
+        drawInstancedBodies(
+            encoder: encoder,
+            vertexBuffer: lowDetailSphereVertexBuffer,
+            indexBuffer: lowDetailSphereIndexBuffer,
+            indexCount: lowDetailSphereIndexCount,
+            instanceBuffer: asteroidInstanceBuffers[dynamicBufferIndex],
+            instanceCount: asteroidInstanceCount
+        )
+    }
+
+    private func drawInstancedBodies(
+        encoder: MTLRenderCommandEncoder,
+        vertexBuffer: MTLBuffer?,
+        indexBuffer: MTLBuffer?,
+        indexCount: Int,
+        instanceBuffer: MTLBuffer?,
+        instanceCount: Int
+    ) {
+        guard let vertexBuffer,
+              let indexBuffer,
+              let instanceBuffer,
+              indexCount > 0,
+              instanceCount > 0 else {
+            return
+        }
+
+        encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+        encoder.setVertexBuffer(instanceBuffer, offset: 0, index: 1)
         encoder.drawIndexedPrimitives(
             type: .triangle,
-            indexCount: sphereIndexCount,
+            indexCount: indexCount,
             indexType: .uint16,
-            indexBuffer: sphereIndexBuffer,
+            indexBuffer: indexBuffer,
             indexBufferOffset: 0,
-            instanceCount: bodyInstanceCount
+            instanceCount: instanceCount
         )
     }
 
     private func drawPaths(encoder: MTLRenderCommandEncoder) {
-        guard let pathVertexBuffer, pathVertexCount > 0 else { return }
+        guard let pathVertexBuffer = pathVertexBuffers[dynamicBufferIndex], pathVertexCount > 0 else { return }
 
         var uniforms = makeUniforms()
 
