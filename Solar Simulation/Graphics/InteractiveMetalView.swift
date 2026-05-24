@@ -7,29 +7,80 @@ final class InteractiveMetalView: MTKView {
     var onResetCamera: (() -> Void)?
 
     private var lastDragLocation: NSPoint?
-    private var pressedMovementKeys: Set<UInt16> = []
+    private var pressedCameraKeys: Set<UInt16> = []
 
     var keyboardMovementInput: SIMD2<Float> {
         var input = SIMD2<Float>(0, 0)
 
-        if pressedMovementKeys.contains(KeyCode.a) {
+        if pressedCameraKeys.contains(KeyCode.a) {
             input.x -= 1
         }
 
-        if pressedMovementKeys.contains(KeyCode.d) {
+        if pressedCameraKeys.contains(KeyCode.d) {
             input.x += 1
         }
 
-        if pressedMovementKeys.contains(KeyCode.w) {
+        if pressedCameraKeys.contains(KeyCode.w) {
             input.y += 1
         }
 
-        if pressedMovementKeys.contains(KeyCode.s) {
+        if pressedCameraKeys.contains(KeyCode.s) {
             input.y -= 1
         }
 
         let length = simd_length(input)
         return length > 1 ? input / length : input
+    }
+
+    var keyboardLookInput: SIMD2<Float> {
+        var input = SIMD2<Float>(0, 0)
+
+        if pressedCameraKeys.contains(KeyCode.leftArrow) {
+            input.x -= 1
+        }
+
+        if pressedCameraKeys.contains(KeyCode.rightArrow) {
+            input.x += 1
+        }
+
+        if pressedCameraKeys.contains(KeyCode.upArrow) {
+            input.y += 1
+        }
+
+        if pressedCameraKeys.contains(KeyCode.downArrow) {
+            input.y -= 1
+        }
+
+        let length = simd_length(input)
+        return length > 1 ? input / length : input
+    }
+
+    var keyboardRollInput: Float {
+        var input: Float = 0
+
+        if pressedCameraKeys.contains(KeyCode.q) {
+            input += 1
+        }
+
+        if pressedCameraKeys.contains(KeyCode.e) {
+            input -= 1
+        }
+
+        return input
+    }
+
+    var keyboardVerticalInput: Float {
+        var input: Float = 0
+
+        if pressedCameraKeys.contains(KeyCode.space) {
+            input += 1
+        }
+
+        if pressedCameraKeys.contains(KeyCode.leftControl) {
+            input -= 1
+        }
+
+        return input
     }
 
     override var acceptsFirstResponder: Bool {
@@ -82,7 +133,7 @@ final class InteractiveMetalView: MTKView {
     }
 
     override func keyDown(with event: NSEvent) {
-        if updateMovementKey(event.keyCode, isPressed: true) {
+        if updateCameraKey(event.keyCode, isPressed: true) {
             return
         }
 
@@ -90,28 +141,37 @@ final class InteractiveMetalView: MTKView {
     }
 
     override func keyUp(with event: NSEvent) {
-        if updateMovementKey(event.keyCode, isPressed: false) {
+        if updateCameraKey(event.keyCode, isPressed: false) {
             return
         }
 
         super.keyUp(with: event)
     }
 
+    override func flagsChanged(with event: NSEvent) {
+        if event.keyCode == KeyCode.leftControl {
+            updateCameraKey(event.keyCode, isPressed: event.modifierFlags.contains(.control))
+            return
+        }
+
+        super.flagsChanged(with: event)
+    }
+
     override func resignFirstResponder() -> Bool {
-        pressedMovementKeys.removeAll()
+        pressedCameraKeys.removeAll()
         return super.resignFirstResponder()
     }
 
     @discardableResult
-    private func updateMovementKey(_ keyCode: UInt16, isPressed: Bool) -> Bool {
-        guard KeyCode.movementKeys.contains(keyCode) else {
+    private func updateCameraKey(_ keyCode: UInt16, isPressed: Bool) -> Bool {
+        guard KeyCode.cameraKeys.contains(keyCode) else {
             return false
         }
 
         if isPressed {
-            pressedMovementKeys.insert(keyCode)
+            pressedCameraKeys.insert(keyCode)
         } else {
-            pressedMovementKeys.remove(keyCode)
+            pressedCameraKeys.remove(keyCode)
         }
 
         return true
@@ -122,7 +182,21 @@ private enum KeyCode {
     static let a: UInt16 = 0
     static let s: UInt16 = 1
     static let d: UInt16 = 2
+    static let q: UInt16 = 12
     static let w: UInt16 = 13
+    static let e: UInt16 = 14
+    static let space: UInt16 = 49
+    static let leftControl: UInt16 = 59
 
-    static let movementKeys: Set<UInt16> = [w, a, s, d]
+    static let leftArrow: UInt16 = 123
+    static let rightArrow: UInt16 = 124
+    static let downArrow: UInt16 = 125
+    static let upArrow: UInt16 = 126
+
+    static let cameraKeys: Set<UInt16> = [
+        w, a, s, d,
+        q, e,
+        space, leftControl,
+        leftArrow, rightArrow, upArrow, downArrow
+    ]
 }

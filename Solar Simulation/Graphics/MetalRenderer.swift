@@ -25,6 +25,10 @@ private struct Uniforms {
 }
 
 final class MetalRenderer: NSObject, MTKViewDelegate {
+    private static let defaultCameraPosition = SIMD3<Float>(0, -72, 34)
+    private static let defaultYaw: Float = 0
+    private static let defaultPitch: Float = -0.44
+
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
     private let bodyPipelineState: MTLRenderPipelineState
@@ -49,17 +53,18 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     private var worldViewProjectionMatrix = matrix_identity_float4x4
     private var lightPosition = SIMD3<Float>(0, 0, 0)
 
-    private var cameraTarget = SIMD3<Float>(0, 0, 0)
-    private var cameraPosition = SIMD3<Float>(0, -72, 34)
-    private var yaw: Float = -0.65
-    private var pitch: Float = 0.48
+    private var cameraPosition = MetalRenderer.defaultCameraPosition
+    private var yaw = MetalRenderer.defaultYaw
+    private var pitch = MetalRenderer.defaultPitch
+    private var roll: Float = 0
     private var zoom: Float = 1.0
     private var lastFrameTime = Date()
 
-    private let baseCameraDistance: Float = 72.0
     private let fieldOfViewRadians: Float = Float.pi / 4
-    private let orbitSensitivity: Float = 0.006
-    private let movementSpeedScale: Float = 0.35
+    private let lookSensitivity: Float = 0.006
+    private let keyboardLookSpeed: Float = 1.25
+    private let keyboardRollSpeed: Float = 1.35
+    private let movementSpeed: Float = 24.0
     private let maximumMovementDeltaTime: Float = 1.0 / 15.0
     private let minimumPitch: Float = -1.2
     private let maximumPitch: Float = 1.2
@@ -159,7 +164,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     }
 
     func setZoom(_ newZoom: Float) {
-        zoom = min(max(newZoom, 0.35), 120.0)
+        zoom = min(max(newZoom, 0.5), 4.0)
         recalculateProjectionForCurrentView()
         rebuildBodyInstanceBuffer(from: currentBodies)
     }
@@ -169,19 +174,20 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     }
 
     func panBy(screenDeltaX dx: Float, screenDeltaY dy: Float) {
-        orbitBy(screenDeltaX: dx, screenDeltaY: dy)
+        lookBy(screenDeltaX: dx, screenDeltaY: dy)
     }
 
-    func orbitBy(screenDeltaX dx: Float, screenDeltaY dy: Float) {
-        yaw -= dx * orbitSensitivity
-        pitch = min(max(pitch + dy * orbitSensitivity, minimumPitch), maximumPitch)
+    func lookBy(screenDeltaX dx: Float, screenDeltaY dy: Float) {
+        yaw += dx * lookSensitivity
+        pitch = min(max(pitch + dy * lookSensitivity, minimumPitch), maximumPitch)
         recalculateProjectionForCurrentView()
     }
 
     func resetCamera() {
-        cameraTarget = SIMD3<Float>(0, 0, 0)
-        yaw = -0.65
-        pitch = 0.48
+        cameraPosition = MetalRenderer.defaultCameraPosition
+        yaw = MetalRenderer.defaultYaw
+        pitch = MetalRenderer.defaultPitch
+        roll = 0
         zoom = 1.0
         recalculateProjectionForCurrentView()
         rebuildBodyInstanceBuffer(from: currentBodies)
@@ -192,7 +198,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     }
 
     func draw(in view: MTKView) {
-        updateCameraMovement(from: view)
+        updateKeyboardCameraControls(from: view)
 
         if let latestBodies = viewModel?.bodies {
             updateBodies(latestBodies)
@@ -423,23 +429,45 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         calculateProjectionMatrix(drawableSize: view.drawableSize)
     }
 
-    private func updateCameraMovement(from view: MTKView) {
+    private func updateKeyboardCameraControls(from view: MTKView) {
         let now = Date()
         let deltaTime = min(max(Float(now.timeIntervalSince(lastFrameTime)), 0), maximumMovementDeltaTime)
         lastFrameTime = now
 
         guard let interactiveView = view as? InteractiveMetalView else { return }
 
-        let input = interactiveView.keyboardMovementInput
-        guard simd_length_squared(input) > 0 else { return }
+        let movementInput = interactiveView.keyboardMovementInput
+        let lookInput = interactiveView.keyboardLookInput
+        let rollInput = interactiveView.keyboardRollInput
+        let verticalInput = interactiveView.keyboardVerticalInput
 
-        let viewDirection = simd_normalize(cameraTarget - cameraPosition)
-        let right = simd_normalize(simd_cross(viewDirection, SIMD3<Float>(0, 0, 1)))
-        let movementDirection = simd_normalize(right * input.x + viewDirection * input.y)
-        let cameraDistance = baseCameraDistance / zoom
-        let speed = max(0.08, cameraDistance * movementSpeedScale)
+        let hasMovement = simd_length_squared(movementInput) > 0 || verticalInput != 0
+        let hasLook = simd_length_squared(lookInput) > 0
+        let hasRoll = rollInput != 0
 
-        cameraTarget += movementDirection * speed * deltaTime
+        guard hasMovement || hasLook || hasRoll else { return }
+
+        if hasLook {
+            yaw += lookInput.x * keyboardLookSpeed * deltaTime
+            pitch = min(max(pitch + lookInput.y * keyboardLookSpeed * deltaTime, minimumPitch), maximumPitch)
+        }
+
+        if hasRoll {
+            roll = wrappedAngle(roll + rollInput * keyboardRollSpeed * deltaTime)
+        }
+
+        if hasMovement {
+            let basis = cameraBasis()
+            let movementDirection = simd_normalize(
+                basis.right * movementInput.x
+                    + basis.forward * movementInput.y
+                    + basis.up * verticalInput
+            )
+            let speed = movementSpeed / max(zoom, 1)
+
+            cameraPosition += movementDirection * speed * deltaTime
+        }
+
         calculateProjectionMatrix(drawableSize: view.drawableSize)
     }
 
@@ -447,28 +475,77 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         let width = max(Float(drawableSize.width), 1)
         let height = max(Float(drawableSize.height), 1)
         let aspect = width / height
-        let distance = baseCameraDistance / zoom
-        let clampedPitch = min(max(pitch, minimumPitch), maximumPitch)
 
-        cameraPosition = cameraTarget + SIMD3<Float>(
-            cos(clampedPitch) * sin(yaw) * distance,
-            -cos(clampedPitch) * cos(yaw) * distance,
-            sin(clampedPitch) * distance
-        )
+        let basis = cameraBasis()
 
         let viewMatrix = lookAt(
             eye: cameraPosition,
-            center: cameraTarget,
-            up: SIMD3<Float>(0, 0, 1)
+            center: cameraPosition + basis.forward,
+            up: basis.up
         )
         let projectionMatrix = perspective(
-            fieldOfViewY: fieldOfViewRadians,
+            fieldOfViewY: effectiveFieldOfView,
             aspect: aspect,
-            near: max(0.01, distance * 0.001),
+            near: 0.01,
             far: 5_000
         )
 
         worldViewProjectionMatrix = projectionMatrix * viewMatrix
+    }
+
+    private var effectiveFieldOfView: Float {
+        min(max(fieldOfViewRadians / zoom, Float.pi / 16), Float.pi / 2)
+    }
+
+    private func cameraForward() -> SIMD3<Float> {
+        let clampedPitch = min(max(pitch, minimumPitch), maximumPitch)
+
+        return simd_normalize(
+            SIMD3<Float>(
+                cos(clampedPitch) * sin(yaw),
+                cos(clampedPitch) * cos(yaw),
+                sin(clampedPitch)
+            )
+        )
+    }
+
+    private func cameraBasis() -> (forward: SIMD3<Float>, right: SIMD3<Float>, up: SIMD3<Float>) {
+        let forward = cameraForward()
+        let up = cameraUp(forward: forward)
+        let right = simd_normalize(simd_cross(forward, up))
+
+        return (forward, right, up)
+    }
+
+    private func cameraUp(forward: SIMD3<Float>) -> SIMD3<Float> {
+        let worldUp = SIMD3<Float>(0, 0, 1)
+        let baseRight = simd_normalize(simd_cross(forward, worldUp))
+        let baseUp = simd_normalize(simd_cross(baseRight, forward))
+
+        return rotate(baseUp, around: forward, angle: -roll)
+    }
+
+    private func rotate(_ vector: SIMD3<Float>, around axis: SIMD3<Float>, angle: Float) -> SIMD3<Float> {
+        let normalizedAxis = simd_normalize(axis)
+        let cosAngle = cos(angle)
+        let sinAngle = sin(angle)
+
+        return vector * cosAngle
+            + simd_cross(normalizedAxis, vector) * sinAngle
+            + normalizedAxis * simd_dot(normalizedAxis, vector) * (1 - cosAngle)
+    }
+
+    private func wrappedAngle(_ angle: Float) -> Float {
+        let period = Float.pi * 2
+        var result = angle.truncatingRemainder(dividingBy: period)
+
+        if result > Float.pi {
+            result -= period
+        } else if result < -Float.pi {
+            result += period
+        }
+
+        return result
     }
 
     private func perspective(

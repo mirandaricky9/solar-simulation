@@ -42,10 +42,18 @@ struct SimulationViewContainer: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: MTKView, context: Context) {
-        context.coordinator.renderer?.updateBodies(viewModel.bodies)
+        guard let renderer = context.coordinator.renderer else { return }
+
+        renderer.updateBodies(viewModel.bodies)
+
+        if context.coordinator.lastCameraResetRequestID != viewModel.cameraResetRequestID {
+            renderer.resetCamera()
+            context.coordinator.lastCameraResetRequestID = viewModel.cameraResetRequestID
+        }
     }
 
     final class Coordinator {
         var renderer: MetalRenderer?
+        var lastCameraResetRequestID = 0
     }
 }

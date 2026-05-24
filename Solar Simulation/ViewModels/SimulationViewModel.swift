@@ -10,6 +10,7 @@ final class SimulationViewModel: ObservableObject {
     @Published var currentTime: Double = 0
     @Published var timeStepMultiplier: Double = 24
     @Published var showAsteroidBelt = true
+    @Published private(set) var cameraResetRequestID = 0
 
     private let simulationEngine = SimulationEngine()
     private var timer: Timer?
@@ -28,6 +29,7 @@ final class SimulationViewModel: ObservableObject {
         isRunning = false
         currentTime = 0
         bodies = Self.makeInitialBodies(includeAsteroids: showAsteroidBelt)
+        cameraResetRequestID += 1
     }
 
     func toggleSimulation() {
