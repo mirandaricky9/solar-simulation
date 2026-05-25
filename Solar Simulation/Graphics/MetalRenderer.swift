@@ -24,8 +24,14 @@ private struct Uniforms {
     var cameraPosition: SIMD4<Float>
 }
 
+private enum ScaleMode {
+    case compact
+    case balanced
+    case realisticDistances
+}
+
 final class MetalRenderer: NSObject, MTKViewDelegate {
-    private static let defaultCameraPosition = SIMD3<Float>(0, -72, 34)
+    private static let defaultCameraPosition = SIMD3<Float>(0, -18, 8.5)
     private static let defaultYaw: Float = 0
     private static let defaultPitch: Float = -0.44
     private static let dynamicBufferCount = 3
@@ -73,22 +79,32 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     private var lastFrameTime = Date()
 
     private let fieldOfViewRadians: Float = Float.pi / 4
+    private let minimumZoomScale: Float = 1.0e-6
+    private let minimumFieldOfViewRadians: Float = Float.pi / 100_000
+    private let maximumFieldOfViewRadians: Float = Float.pi * 0.999
     private let lookSensitivity: Float = 0.006
     private let keyboardLookSpeed: Float = 1.25
     private let keyboardRollSpeed: Float = 1.35
     private let movementSpeed: Float = 24.0
+    private let minimumCameraSensitivity: Float = 0.05
+    private let maximumCameraSensitivity: Float = 1.0
     private let maximumMovementDeltaTime: Float = 1.0 / 15.0
     private let minimumPitch: Float = -1.2
     private let maximumPitch: Float = 1.2
 
     private var bodySizeMultiplier: Float = 1.0
+    private var cameraSensitivityMultiplier: Float = 1.0
+    private let scaleMode: ScaleMode = .balanced
 
-    private let starRenderRadius: Float = 0.55
-    private let planetMinimumRenderRadius: Float = 0.09
-    private let planetRenderScale: Float = 0.82
-    private let moonRenderRadius: Float = 0.055
-    private let asteroidRenderRadius: Float = 0.018
-    private let zoomRadiusFalloff: Float = 0.12
+    private let sunVisualRadiusAU: Float = 0.08
+    private let minimumPlanetVisualRadiusAU: Float = 0.012
+    private let moonVisualRadiusAU: Float = 0.006
+    private let asteroidVisualRadiusAU: Float = 0.0025
+    private let planetRadiusScale: Float = 0.08
+    private let moonRadiusScale: Float = 0.06
+    private let compactScaleMultiplier: Float = 1.35
+    private let realisticScaleMultiplier: Float = 0.45
+    private let zoomRadiusFalloff: Float = 0.08
 
     init(mtkView: MTKView, viewModel: SimulationViewModel) {
         guard let device = mtkView.device else {
@@ -195,12 +211,16 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     }
 
     func setZoom(_ newZoom: Float) {
-        zoom = min(max(newZoom, 0.5), 4.0)
+        guard newZoom.isFinite else { return }
+
+        zoom = max(newZoom, minimumZoomScale)
         recalculateProjectionForCurrentView()
         rebuildBodyInstanceBuffer(from: currentBodies)
     }
 
     func zoomBy(_ factor: Float) {
+        guard factor.isFinite, factor > 0 else { return }
+
         setZoom(zoom * factor)
     }
 
@@ -209,9 +229,16 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     }
 
     func lookBy(screenDeltaX dx: Float, screenDeltaY dy: Float) {
-        yaw += dx * lookSensitivity
-        pitch = min(max(pitch + dy * lookSensitivity, minimumPitch), maximumPitch)
+        let sensitivity = lookSensitivity * cameraSensitivityMultiplier
+        yaw += dx * sensitivity
+        pitch = min(max(pitch + dy * sensitivity, minimumPitch), maximumPitch)
         recalculateProjectionForCurrentView()
+    }
+
+    func setCameraSensitivityMultiplier(_ multiplier: Float) {
+        guard multiplier.isFinite else { return }
+
+        cameraSensitivityMultiplier = min(max(multiplier, minimumCameraSensitivity), maximumCameraSensitivity)
     }
 
     func resetCamera() {
@@ -558,17 +585,29 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         let baseRadius: Float
 
         if body.isStar {
-            baseRadius = starRenderRadius
+            baseRadius = sunVisualRadiusAU
         } else if body.isAsteroid {
-            baseRadius = asteroidRenderRadius
+            baseRadius = asteroidVisualRadiusAU
         } else if body.isMoon {
-            baseRadius = moonRenderRadius
+            let scaled = Float(body.visualRadius / 700_000_000.0) * moonRadiusScale
+            baseRadius = max(moonVisualRadiusAU, scaled)
         } else {
-            let scaled = Float(body.visualRadius / 700_000_000.0) * planetRenderScale
-            baseRadius = max(planetMinimumRenderRadius, scaled)
+            let scaled = Float(body.visualRadius / 700_000_000.0) * planetRadiusScale
+            baseRadius = max(minimumPlanetVisualRadiusAU, scaled)
         }
 
-        return (baseRadius * bodySizeMultiplier) / pow(max(zoom, 1.0), zoomRadiusFalloff)
+        return (baseRadius * scaleModeMultiplier * bodySizeMultiplier) / pow(max(zoom, 1.0), zoomRadiusFalloff)
+    }
+
+    private var scaleModeMultiplier: Float {
+        switch scaleMode {
+        case .compact:
+            compactScaleMultiplier
+        case .balanced:
+            1.0
+        case .realisticDistances:
+            realisticScaleMultiplier
+        }
     }
 
     private func recalculateProjectionForCurrentView() {
@@ -595,12 +634,13 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         guard hasMovement || hasLook || hasRoll else { return }
 
         if hasLook {
-            yaw += lookInput.x * keyboardLookSpeed * deltaTime
-            pitch = min(max(pitch + lookInput.y * keyboardLookSpeed * deltaTime, minimumPitch), maximumPitch)
+            let lookSpeed = keyboardLookSpeed * cameraSensitivityMultiplier
+            yaw += lookInput.x * lookSpeed * deltaTime
+            pitch = min(max(pitch + lookInput.y * lookSpeed * deltaTime, minimumPitch), maximumPitch)
         }
 
         if hasRoll {
-            roll = wrappedAngle(roll + rollInput * keyboardRollSpeed * deltaTime)
+            roll = wrappedAngle(roll + rollInput * keyboardRollSpeed * cameraSensitivityMultiplier * deltaTime)
         }
 
         if hasMovement {
@@ -610,7 +650,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
                     + basis.forward * movementInput.y
                     + basis.up * verticalInput
             )
-            let speed = movementSpeed / max(zoom, 1)
+            let speed = movementSpeed * cameraSensitivityMultiplier / max(zoom, 1)
 
             cameraPosition += movementDirection * speed * deltaTime
         }
@@ -641,7 +681,8 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     }
 
     private var effectiveFieldOfView: Float {
-        min(max(fieldOfViewRadians / zoom, Float.pi / 16), Float.pi / 2)
+        let unclampedFieldOfView = fieldOfViewRadians / max(zoom, minimumZoomScale)
+        return min(max(unclampedFieldOfView, minimumFieldOfViewRadians), maximumFieldOfViewRadians)
     }
 
     private func cameraForward() -> SIMD3<Float> {

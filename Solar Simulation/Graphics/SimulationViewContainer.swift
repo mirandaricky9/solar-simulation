@@ -23,6 +23,7 @@ struct SimulationViewContainer: NSViewRepresentable {
         mtkView.isPaused = false
 
         let renderer = MetalRenderer(mtkView: mtkView, viewModel: viewModel)
+        renderer.setCameraSensitivityMultiplier(Float(viewModel.cameraSensitivity))
         context.coordinator.renderer = renderer
         mtkView.delegate = renderer
 
@@ -45,6 +46,7 @@ struct SimulationViewContainer: NSViewRepresentable {
         guard let renderer = context.coordinator.renderer else { return }
 
         renderer.updateBodies(viewModel.bodies)
+        renderer.setCameraSensitivityMultiplier(Float(viewModel.cameraSensitivity))
 
         if context.coordinator.lastCameraResetRequestID != viewModel.cameraResetRequestID {
             renderer.resetCamera()

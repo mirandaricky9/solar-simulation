@@ -11,11 +11,20 @@ struct CelestialBody: Identifiable, Sendable {
     let isStar: Bool
     let isMoon: Bool
     let isAsteroid: Bool
+    let showsTrail: Bool
+    let parentName: String?
+    let orbitalRadius: Double?
+    let orbitalSpeed: Double?
     let color: SIMD4<Float>
 
     var position: SIMD3<Double>
     var velocity: SIMD3<Double>
     var cumulativePosition: [SIMD3<Double>] = []
+    var orbitalPhase: Double?
+
+    nonisolated var usesParentedOrbit: Bool {
+        parentName != nil && orbitalRadius != nil && orbitalSpeed != nil && !isAsteroid
+    }
 
     init(
         name: String,
@@ -26,7 +35,12 @@ struct CelestialBody: Identifiable, Sendable {
         color: SIMD4<Float>,
         isStar: Bool = false,
         isMoon: Bool = false,
-        isAsteroid: Bool = false
+        isAsteroid: Bool = false,
+        showsTrail: Bool = true,
+        parentName: String? = nil,
+        orbitalRadius: Double? = nil,
+        orbitalSpeed: Double? = nil,
+        orbitalPhase: Double? = nil
     ) {
         self.name = name
         self.mass = mass
@@ -39,5 +53,10 @@ struct CelestialBody: Identifiable, Sendable {
         self.isStar = isStar
         self.isMoon = isMoon
         self.isAsteroid = isAsteroid
+        self.showsTrail = showsTrail && !isAsteroid
+        self.parentName = parentName
+        self.orbitalRadius = orbitalRadius
+        self.orbitalSpeed = orbitalSpeed
+        self.orbitalPhase = orbitalPhase
     }
 }

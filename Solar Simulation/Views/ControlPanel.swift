@@ -31,6 +31,15 @@ struct ControlPanel: View {
                 .monospacedDigit()
                 .frame(width: 48, alignment: .leading)
 
+            Text("Camera")
+
+            Slider(value: $viewModel.cameraSensitivity, in: 0.05...1, step: 0.05)
+                .frame(width: 160)
+
+            Text("\(viewModel.cameraSensitivity, specifier: "%.2g")x")
+                .monospacedDigit()
+                .frame(width: 48, alignment: .leading)
+
             Spacer()
 
             Text("Bodies: \(viewModel.bodies.count)")
