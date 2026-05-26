@@ -17,6 +17,8 @@ final class SimulationViewModel: ObservableObject {
     private var simulationTask: Task<Void, Never>?
     private var workerSyncTask: Task<Void, Never>?
     private var accumulatedTime: Double = 0
+    private let fixedPhysicsStepSeconds: Double = 300.0
+    private let maxSubstepsPerFrame = 200
     private let simulationFrameIntervalNanoseconds: UInt64 = 16_666_667
     private let publishedSnapshotInterval = 2
 
@@ -56,7 +58,7 @@ final class SimulationViewModel: ObservableObject {
     }
 
     func simulateStep() {
-        let dt = SolarSystemConstants.baseTimeStep * timeStepMultiplier
+        let dt = fixedPhysicsStepSeconds
 
         Task { [simulationWorker] in
             let steppedBodies = await simulationWorker.step(dt: dt)
@@ -78,19 +80,28 @@ final class SimulationViewModel: ObservableObject {
             while !Task.isCancelled {
                 guard let self else { return }
 
-                let dt = SolarSystemConstants.baseTimeStep * self.timeStepMultiplier
+                let dt = self.fixedPhysicsStepSeconds
+                let requestedSubsteps = Int(self.timeStepMultiplier.rounded())
+                let substeps = min(max(requestedSubsteps, 1), self.maxSubstepsPerFrame)
+                let simulatedTimeAdvanced = Double(substeps) * dt
                 let shouldPublish = stepIndex % self.publishedSnapshotInterval == 0
 
                 if shouldPublish {
-                    let steppedBodies = await self.simulationWorker.step(dt: dt)
+                    let steppedBodies = await self.simulationWorker.advanceAndSnapshot(
+                        substeps: substeps,
+                        dt: dt
+                    )
                     guard !Task.isCancelled else { return }
-                    self.accumulatedTime += dt
+                    self.accumulatedTime += simulatedTimeAdvanced
                     self.currentTime = self.accumulatedTime
                     self.bodies = steppedBodies
                 } else {
-                    await self.simulationWorker.advance(dt: dt)
+                    await self.simulationWorker.advanceWithoutSnapshot(
+                        substeps: substeps,
+                        dt: dt
+                    )
                     guard !Task.isCancelled else { return }
-                    self.accumulatedTime += dt
+                    self.accumulatedTime += simulatedTimeAdvanced
                 }
 
                 stepIndex += 1
