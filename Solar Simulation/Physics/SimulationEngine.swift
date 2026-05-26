@@ -11,30 +11,25 @@ nonisolated final class SimulationEngine {
     }
 
     func step(bodies: inout [CelestialBody], dt: Double) {
+        guard dt.isFinite, dt > 0 else { return }
+
         let snapshot = bodies
         let parentedMoonIndices = snapshot.indices.filter { snapshot[$0].usesParentedOrbit }
-        let massiveIndices = snapshot.indices.filter { !snapshot[$0].isAsteroid && !snapshot[$0].usesParentedOrbit }
-        let asteroidIndices = snapshot.indices.filter { snapshot[$0].isAsteroid }
-        var accelerations = Array(repeating: SIMD3<Double>(0, 0, 0), count: snapshot.count)
-
-        for index in massiveIndices {
-            for otherIndex in massiveIndices {
-                guard otherIndex != index else { continue }
-                accelerations[index] += acceleration(on: snapshot[index], from: snapshot[otherIndex])
-            }
-        }
-
-        for index in asteroidIndices {
-            for otherIndex in massiveIndices {
-                accelerations[index] += acceleration(on: snapshot[index], from: snapshot[otherIndex])
-            }
-        }
+        let oldAccelerations = computeAccelerations(for: snapshot)
+        let halfDtSquared = 0.5 * dt * dt
 
         for index in bodies.indices {
             guard !snapshot[index].usesParentedOrbit else { continue }
 
-            bodies[index].velocity += accelerations[index] * dt
-            bodies[index].position += bodies[index].velocity * dt
+            bodies[index].position += snapshot[index].velocity * dt + oldAccelerations[index] * halfDtSquared
+        }
+
+        let newAccelerations = computeAccelerations(for: bodies)
+
+        for index in bodies.indices {
+            guard !snapshot[index].usesParentedOrbit else { continue }
+
+            bodies[index].velocity = snapshot[index].velocity + 0.5 * (oldAccelerations[index] + newAccelerations[index]) * dt
         }
 
         updateParentedMoons(at: parentedMoonIndices, in: &bodies, dt: dt)
@@ -85,6 +80,27 @@ nonisolated final class SimulationEngine {
                 }
             }
         }
+    }
+
+    private func computeAccelerations(for snapshot: [CelestialBody]) -> [SIMD3<Double>] {
+        let massiveIndices = snapshot.indices.filter { !snapshot[$0].isAsteroid && !snapshot[$0].usesParentedOrbit }
+        let asteroidIndices = snapshot.indices.filter { snapshot[$0].isAsteroid }
+        var accelerations = Array(repeating: SIMD3<Double>(0, 0, 0), count: snapshot.count)
+
+        for index in massiveIndices {
+            for otherIndex in massiveIndices {
+                guard otherIndex != index else { continue }
+                accelerations[index] += acceleration(on: snapshot[index], from: snapshot[otherIndex])
+            }
+        }
+
+        for index in asteroidIndices {
+            for otherIndex in massiveIndices {
+                accelerations[index] += acceleration(on: snapshot[index], from: snapshot[otherIndex])
+            }
+        }
+
+        return accelerations
     }
 
     private func acceleration(on target: CelestialBody, from other: CelestialBody) -> SIMD3<Double> {

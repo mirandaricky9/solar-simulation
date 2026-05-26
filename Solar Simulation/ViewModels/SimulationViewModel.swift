@@ -71,6 +71,7 @@ final class SimulationViewModel: ObservableObject {
 
     private func startSimulationLoop() {
         simulationTask?.cancel()
+
         simulationTask = Task { [weak self] in
             var stepIndex = 0
 
