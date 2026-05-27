@@ -263,7 +263,12 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         currentBodies = bodies
         rebuildBodyInstanceBuffer(from: bodies)
         rebuildStaticOrbitBufferIfNeeded(from: bodies)
-        rebuildPathBuffer(from: bodies)
+
+        if viewModel?.showLiveTrails == false {
+            pathVertexCount = 0
+        } else {
+            rebuildPathBuffer(from: bodies)
+        }
     }
 
     func setZoom(_ newZoom: Float) {
@@ -1017,10 +1022,12 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
 
     private func drawPaths(encoder: MTLRenderCommandEncoder) {
         let shouldDrawComets = viewModel?.showComets == true
-        let hasStaticOrbits = staticOrbitVertexBuffer != nil && staticOrbitVertexCount > 0
-        let hasCometOrbits = shouldDrawComets && cometOrbitVertexBuffer != nil && cometOrbitVertexCount > 0
+        let shouldDrawPretracedPaths = viewModel?.showPretracedOrbitPaths != false
+        let shouldDrawLiveTrails = viewModel?.showLiveTrails != false
+        let hasStaticOrbits = shouldDrawPretracedPaths && staticOrbitVertexBuffer != nil && staticOrbitVertexCount > 0
+        let hasCometOrbits = shouldDrawPretracedPaths && shouldDrawComets && cometOrbitVertexBuffer != nil && cometOrbitVertexCount > 0
         let hasCometTails = shouldDrawComets && cometTailVertexBuffers[dynamicBufferIndex] != nil && cometTailVertexCount > 0
-        let hasDynamicTrails = pathVertexBuffers[dynamicBufferIndex] != nil && pathVertexCount > 0
+        let hasDynamicTrails = shouldDrawLiveTrails && pathVertexBuffers[dynamicBufferIndex] != nil && pathVertexCount > 0
         guard hasStaticOrbits || hasCometOrbits || hasCometTails || hasDynamicTrails else { return }
 
         var uniforms = makeUniforms()
@@ -1029,12 +1036,12 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         encoder.setDepthStencilState(pathDepthStencilState)
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
 
-        if let staticOrbitVertexBuffer, staticOrbitVertexCount > 0 {
+        if let staticOrbitVertexBuffer, shouldDrawPretracedPaths, staticOrbitVertexCount > 0 {
             encoder.setVertexBuffer(staticOrbitVertexBuffer, offset: 0, index: 0)
             encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: staticOrbitVertexCount)
         }
 
-        if let cometOrbitVertexBuffer, shouldDrawComets, cometOrbitVertexCount > 0 {
+        if let cometOrbitVertexBuffer, shouldDrawPretracedPaths, shouldDrawComets, cometOrbitVertexCount > 0 {
             encoder.setVertexBuffer(cometOrbitVertexBuffer, offset: 0, index: 0)
             encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: cometOrbitVertexCount)
         }
@@ -1046,7 +1053,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: cometTailVertexCount)
         }
 
-        if let pathVertexBuffer = pathVertexBuffers[dynamicBufferIndex], pathVertexCount > 0 {
+        if let pathVertexBuffer = pathVertexBuffers[dynamicBufferIndex], shouldDrawLiveTrails, pathVertexCount > 0 {
             encoder.setVertexBuffer(pathVertexBuffer, offset: 0, index: 0)
             encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: pathVertexCount)
         }

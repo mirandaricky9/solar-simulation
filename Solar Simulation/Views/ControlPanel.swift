@@ -24,6 +24,10 @@ struct ControlPanel: View {
 
             Toggle("Comets", isOn: $viewModel.showComets)
 
+            Toggle("Live Trails", isOn: $viewModel.showLiveTrails)
+
+            Toggle("Orbit Paths", isOn: $viewModel.showPretracedOrbitPaths)
+
             Text("Speed")
 
             Slider(value: $viewModel.simulatedDaysPerSecond, in: 0.25...100, step: 0.25)

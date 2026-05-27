@@ -13,6 +13,8 @@ final class SimulationViewModel: ObservableObject {
     @Published var cameraSensitivity: Double = 1.0
     @Published var showAsteroidBelt = true
     @Published var showComets = true
+    @Published var showLiveTrails = true
+    @Published var showPretracedOrbitPaths = true
     @Published private(set) var cameraResetRequestID = 0
     @Published private(set) var asteroidField = AsteroidField(count: 0)
     let cometField = CometVisualField()
