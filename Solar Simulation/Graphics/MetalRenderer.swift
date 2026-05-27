@@ -31,9 +31,9 @@ private enum ScaleMode {
 }
 
 final class MetalRenderer: NSObject, MTKViewDelegate {
-    private static let defaultCameraPosition = SIMD3<Float>(0, -18, 8.5)
+    private static let defaultCameraPosition = SIMD3<Float>(0, 0, 80)
     private static let defaultYaw: Float = 0
-    private static let defaultPitch: Float = -0.44
+    private static let defaultPitch: Float = -Float.pi / 2
     private static let dynamicBufferCount = 3
 
     private let device: MTLDevice
@@ -65,6 +65,12 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     private var pathVertexBuffers = Array<MTLBuffer?>(repeating: nil, count: MetalRenderer.dynamicBufferCount)
     private var pathVertexCapacities = Array(repeating: 0, count: MetalRenderer.dynamicBufferCount)
     private var pathVertexCount = 0
+
+    private var staticOrbitVertexBuffer: MTLBuffer?
+    private var staticOrbitVertexCapacity = 0
+    private var staticOrbitVertexCount = 0
+    private var staticOrbitSignature: [UUID] = []
+
     private var dynamicBufferIndex = 0
 
     private var currentBodies: [CelestialBody] = []
@@ -89,8 +95,8 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     private let minimumCameraSensitivity: Float = 0.05
     private let maximumCameraSensitivity: Float = 1.0
     private let maximumMovementDeltaTime: Float = 1.0 / 15.0
-    private let minimumPitch: Float = -1.2
-    private let maximumPitch: Float = 1.2
+    private let minimumPitch: Float = -Float.pi / 2
+    private let maximumPitch: Float = Float.pi / 2
 
     private var bodySizeMultiplier: Float = 1.0
     private var cameraSensitivityMultiplier: Float = 1.0
@@ -105,6 +111,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     private let compactScaleMultiplier: Float = 1.35
     private let realisticScaleMultiplier: Float = 0.45
     private let zoomRadiusFalloff: Float = 0.08
+    private let orbitRingSegmentCount = 512
 
     init(mtkView: MTKView, viewModel: SimulationViewModel) {
         guard let device = mtkView.device else {
@@ -207,6 +214,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     func updateBodies(_ bodies: [CelestialBody]) {
         currentBodies = bodies
         rebuildBodyInstanceBuffer(from: bodies)
+        rebuildStaticOrbitBufferIfNeeded(from: bodies)
         rebuildPathBuffer(from: bodies)
     }
 
@@ -452,6 +460,65 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         }
     }
 
+    private func rebuildStaticOrbitBufferIfNeeded(from bodies: [CelestialBody]) {
+        let signature = bodies.map(\.id)
+        guard signature != staticOrbitSignature else { return }
+
+        staticOrbitSignature = signature
+
+        guard let sun = bodies.first(where: \.isStar) else {
+            staticOrbitVertexCount = 0
+            return
+        }
+
+        let sunPosition = toRenderPosition(sun.initialPosition)
+        var vertices: [PathVertex] = []
+
+        for body in bodies where !body.isStar && !body.isAsteroid && !body.isMoon {
+            let bodyPosition = toRenderPosition(body.initialPosition)
+            let radius = simd_length(bodyPosition - sunPosition)
+            guard radius > 0 else { continue }
+
+            let color = SIMD4<Float>(body.color.x, body.color.y, body.color.z, 0.22)
+
+            for segment in 0..<orbitRingSegmentCount {
+                let startAngle = Float(segment) / Float(orbitRingSegmentCount) * Float.pi * 2
+                let endAngle = Float(segment + 1) / Float(orbitRingSegmentCount) * Float.pi * 2
+                let start = sunPosition + SIMD3<Float>(
+                    cos(startAngle) * radius,
+                    sin(startAngle) * radius,
+                    0
+                )
+                let end = sunPosition + SIMD3<Float>(
+                    cos(endAngle) * radius,
+                    sin(endAngle) * radius,
+                    0
+                )
+
+                vertices.append(PathVertex(position: SIMD4<Float>(start, 1), color: color))
+                vertices.append(PathVertex(position: SIMD4<Float>(end, 1), color: color))
+            }
+        }
+
+        staticOrbitVertexCount = vertices.count
+
+        guard !vertices.isEmpty else { return }
+
+        ensureStaticOrbitVertexBuffer(requiredCount: vertices.count)
+
+        guard let pointer = staticOrbitVertexBuffer?.contents().bindMemory(
+            to: PathVertex.self,
+            capacity: staticOrbitVertexCapacity
+        ) else {
+            staticOrbitVertexCount = 0
+            return
+        }
+
+        for index in vertices.indices {
+            pointer[index] = vertices[index]
+        }
+    }
+
     private static func ensureBodyInstanceBuffer(
         device: MTLDevice,
         buffers: inout [MTLBuffer?],
@@ -487,6 +554,18 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             options: .storageModeShared
         )
         buffers[bufferIndex]?.label = "Path Vertex Buffer \(bufferIndex)"
+    }
+
+    private func ensureStaticOrbitVertexBuffer(requiredCount: Int) {
+        guard requiredCount > 0 else { return }
+        guard staticOrbitVertexBuffer == nil || staticOrbitVertexCapacity < requiredCount else { return }
+
+        staticOrbitVertexCapacity = max(requiredCount, max(1, staticOrbitVertexCapacity * 2))
+        staticOrbitVertexBuffer = device.makeBuffer(
+            length: MemoryLayout<PathVertex>.stride * staticOrbitVertexCapacity,
+            options: .storageModeShared
+        )
+        staticOrbitVertexBuffer?.label = "Static Orbit Ring Vertex Buffer"
     }
 
     private func drawBodyInstances(encoder: MTLRenderCommandEncoder) {
@@ -544,15 +623,25 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     }
 
     private func drawPaths(encoder: MTLRenderCommandEncoder) {
-        guard let pathVertexBuffer = pathVertexBuffers[dynamicBufferIndex], pathVertexCount > 0 else { return }
+        let hasStaticOrbits = staticOrbitVertexBuffer != nil && staticOrbitVertexCount > 0
+        let hasDynamicTrails = pathVertexBuffers[dynamicBufferIndex] != nil && pathVertexCount > 0
+        guard hasStaticOrbits || hasDynamicTrails else { return }
 
         var uniforms = makeUniforms()
 
         encoder.setRenderPipelineState(pathPipelineState)
         encoder.setDepthStencilState(pathDepthStencilState)
-        encoder.setVertexBuffer(pathVertexBuffer, offset: 0, index: 0)
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
-        encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: pathVertexCount)
+
+        if let staticOrbitVertexBuffer, staticOrbitVertexCount > 0 {
+            encoder.setVertexBuffer(staticOrbitVertexBuffer, offset: 0, index: 0)
+            encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: staticOrbitVertexCount)
+        }
+
+        if let pathVertexBuffer = pathVertexBuffers[dynamicBufferIndex], pathVertexCount > 0 {
+            encoder.setVertexBuffer(pathVertexBuffer, offset: 0, index: 0)
+            encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: pathVertexCount)
+        }
     }
 
     private func makeUniforms() -> Uniforms {
@@ -707,6 +796,10 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
 
     private func cameraUp(forward: SIMD3<Float>) -> SIMD3<Float> {
         let worldUp = SIMD3<Float>(0, 0, 1)
+        guard abs(simd_dot(forward, worldUp)) < 0.999 else {
+            return rotate(SIMD3<Float>(0, 1, 0), around: forward, angle: -roll)
+        }
+
         let baseRight = simd_normalize(simd_cross(forward, worldUp))
         let baseUp = simd_normalize(simd_cross(baseRight, forward))
 

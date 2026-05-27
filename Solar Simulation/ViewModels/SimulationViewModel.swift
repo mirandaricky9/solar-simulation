@@ -8,7 +8,8 @@ final class SimulationViewModel: ObservableObject {
     @Published private(set) var bodies: [CelestialBody] = []
     @Published var isRunning = false
     @Published var currentTime: Double = 0
-    @Published var timeStepMultiplier: Double = 24
+    @Published var simulatedDaysPerSecond: Double = 10
+    @Published var directTimeStepMultiplier: Double = 1
     @Published var cameraSensitivity: Double = 1.0
     @Published var showAsteroidBelt = true
     @Published private(set) var cameraResetRequestID = 0
@@ -17,8 +18,10 @@ final class SimulationViewModel: ObservableObject {
     private var simulationTask: Task<Void, Never>?
     private var workerSyncTask: Task<Void, Never>?
     private var accumulatedTime: Double = 0
-    private let fixedPhysicsStepSeconds: Double = 300.0
-    private let maxSubstepsPerFrame = 200
+    private var accumulatedSimulationDebt: Double = 0
+    private var lastFrameTime: CFTimeInterval?
+    private let fixedPhysicsStepSeconds: Double = 3_600
+    private let maxSubstepsPerFrame = 32
     private let simulationFrameIntervalNanoseconds: UInt64 = 16_666_667
     private let publishedSnapshotInterval = 2
 
@@ -38,6 +41,8 @@ final class SimulationViewModel: ObservableObject {
         isRunning = false
         currentTime = 0
         accumulatedTime = 0
+        accumulatedSimulationDebt = 0
+        lastFrameTime = nil
 
         let newBodies = Self.makeInitialBodies(includeAsteroids: showAsteroidBelt)
         bodies = newBodies
@@ -58,7 +63,7 @@ final class SimulationViewModel: ObservableObject {
     }
 
     func simulateStep() {
-        let dt = fixedPhysicsStepSeconds
+        let dt = directPhysicsStepSeconds
 
         Task { [simulationWorker] in
             let steppedBodies = await simulationWorker.step(dt: dt)
@@ -73,6 +78,8 @@ final class SimulationViewModel: ObservableObject {
 
     private func startSimulationLoop() {
         simulationTask?.cancel()
+        accumulatedSimulationDebt = 0
+        lastFrameTime = nil
 
         simulationTask = Task { [weak self] in
             var stepIndex = 0
@@ -80,31 +87,53 @@ final class SimulationViewModel: ObservableObject {
             while !Task.isCancelled {
                 guard let self else { return }
 
-                let dt = self.fixedPhysicsStepSeconds
-                let requestedSubsteps = Int(self.timeStepMultiplier.rounded())
-                let substeps = min(max(requestedSubsteps, 1), self.maxSubstepsPerFrame)
-                let simulatedTimeAdvanced = Double(substeps) * dt
-                let shouldPublish = stepIndex % self.publishedSnapshotInterval == 0
+                let now = CFAbsoluteTimeGetCurrent()
+                let realDelta = self.lastFrameTime.map { max(0, now - $0) } ?? 0
+                self.lastFrameTime = now
 
-                if shouldPublish {
-                    let steppedBodies = await self.simulationWorker.advanceAndSnapshot(
-                        substeps: substeps,
-                        dt: dt
-                    )
-                    guard !Task.isCancelled else { return }
-                    self.accumulatedTime += simulatedTimeAdvanced
-                    self.currentTime = self.accumulatedTime
-                    self.bodies = steppedBodies
-                } else {
-                    await self.simulationWorker.advanceWithoutSnapshot(
-                        substeps: substeps,
-                        dt: dt
-                    )
-                    guard !Task.isCancelled else { return }
-                    self.accumulatedTime += simulatedTimeAdvanced
+                let dt = self.fixedPhysicsStepSeconds
+                let physicsStepDt = self.directPhysicsStepSeconds
+                self.accumulatedSimulationDebt += realDelta * self.simulatedSecondsPerRealSecond
+
+                var substeps = 0
+                while self.accumulatedSimulationDebt >= dt && substeps < self.maxSubstepsPerFrame {
+                    self.accumulatedSimulationDebt -= dt
+                    substeps += 1
                 }
 
-                stepIndex += 1
+                if substeps == self.maxSubstepsPerFrame {
+                    self.accumulatedSimulationDebt = min(
+                        self.accumulatedSimulationDebt,
+                        dt * Double(self.maxSubstepsPerFrame)
+                    )
+                }
+
+                let shouldPublish = stepIndex % self.publishedSnapshotInterval == 0
+
+                if substeps > 0 {
+                    let simulatedTimeAdvanced = Double(substeps) * physicsStepDt
+
+                    if shouldPublish {
+                        let steppedBodies = await self.simulationWorker.advanceAndSnapshot(
+                            substeps: substeps,
+                            dt: physicsStepDt
+                        )
+                        guard !Task.isCancelled else { return }
+                        self.accumulatedTime += simulatedTimeAdvanced
+                        self.currentTime = self.accumulatedTime
+                        self.bodies = steppedBodies
+                    } else {
+                        await self.simulationWorker.advanceWithoutSnapshot(
+                            substeps: substeps,
+                            dt: physicsStepDt
+                        )
+                        guard !Task.isCancelled else { return }
+                        self.accumulatedTime += simulatedTimeAdvanced
+                    }
+
+                    stepIndex += 1
+                }
+
                 try? await Task.sleep(nanoseconds: self.simulationFrameIntervalNanoseconds)
             }
         }
@@ -114,6 +143,15 @@ final class SimulationViewModel: ObservableObject {
         simulationTask?.cancel()
         simulationTask = nil
         isRunning = false
+        lastFrameTime = nil
+    }
+
+    private var simulatedSecondsPerRealSecond: Double {
+        simulatedDaysPerSecond * 86_400
+    }
+
+    private var directPhysicsStepSeconds: Double {
+        fixedPhysicsStepSeconds * directTimeStepMultiplier
     }
 
     static func makeInitialBodies(includeAsteroids: Bool) -> [CelestialBody] {

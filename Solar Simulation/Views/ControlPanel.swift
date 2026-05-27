@@ -24,10 +24,19 @@ struct ControlPanel: View {
 
             Text("Speed")
 
-            Slider(value: $viewModel.timeStepMultiplier, in: 1...500, step: 1)
+            Slider(value: $viewModel.simulatedDaysPerSecond, in: 0.25...100, step: 0.25)
                 .frame(width: 220)
 
-            Text("\(Int(viewModel.timeStepMultiplier))x")
+            Text("\(viewModel.simulatedDaysPerSecond, specifier: "%.2g") days/s")
+                .monospacedDigit()
+                .frame(width: 80, alignment: .leading)
+
+            Text("dt")
+
+            Slider(value: $viewModel.directTimeStepMultiplier, in: 1...500, step: 1)
+                .frame(width: 160)
+
+            Text("\(Int(viewModel.directTimeStepMultiplier))x")
                 .monospacedDigit()
                 .frame(width: 48, alignment: .leading)
 

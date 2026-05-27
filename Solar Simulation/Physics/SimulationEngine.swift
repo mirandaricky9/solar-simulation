@@ -3,7 +3,7 @@ import simd
 
 nonisolated final class SimulationEngine {
     private var stepCounter = 0
-    private let trailSampleInterval = 4
+    private let trailSampleInterval = 8
     private let maxTrailPoints = 1_000
 
     func reset() {
@@ -67,6 +67,7 @@ nonisolated final class SimulationEngine {
     }
 
     private func updateTrails(for bodies: inout [CelestialBody]) {
+        // These are bounded recent-motion trails; full orbit rings are rendered separately.
         for index in bodies.indices {
             if !bodies[index].showsTrail {
                 if !bodies[index].cumulativePosition.isEmpty {
