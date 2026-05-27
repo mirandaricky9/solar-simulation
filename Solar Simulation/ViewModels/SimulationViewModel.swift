@@ -13,6 +13,7 @@ final class SimulationViewModel: ObservableObject {
     @Published var cameraSensitivity: Double = 1.0
     @Published var showAsteroidBelt = true
     @Published private(set) var cameraResetRequestID = 0
+    @Published private(set) var asteroidField = AsteroidField(count: 0)
 
     private let simulationWorker = SimulationWorker()
     private var simulationTask: Task<Void, Never>?
@@ -24,6 +25,7 @@ final class SimulationViewModel: ObservableObject {
     private let maxSubstepsPerFrame = 32
     private let simulationFrameIntervalNanoseconds: UInt64 = 16_666_667
     private let publishedSnapshotInterval = 2
+    private let defaultAsteroidVisualCount = 8_000
 
     init() {
         reset()
@@ -44,7 +46,9 @@ final class SimulationViewModel: ObservableObject {
         accumulatedSimulationDebt = 0
         lastFrameTime = nil
 
-        let newBodies = Self.makeInitialBodies(includeAsteroids: showAsteroidBelt)
+        asteroidField = AsteroidField(count: showAsteroidBelt ? defaultAsteroidVisualCount : 0)
+
+        let newBodies = Self.makeInitialBodies()
         bodies = newBodies
         cameraResetRequestID += 1
 
@@ -154,7 +158,7 @@ final class SimulationViewModel: ObservableObject {
         fixedPhysicsStepSeconds * directTimeStepMultiplier
     }
 
-    static func makeInitialBodies(includeAsteroids: Bool) -> [CelestialBody] {
+    static func makeInitialBodies() -> [CelestialBody] {
         var result: [CelestialBody] = []
         let au = SolarSystemConstants.astronomicalUnit
 
@@ -234,41 +238,6 @@ final class SimulationViewModel: ObservableObject {
         addMoon(&result, name: "Nereid", parentName: "Neptune", parentPosition: neptune.position, parentVelocity: neptune.velocity, mass: 3.1e19, radius: 170_000, distanceFromParent: 5_513_400_000, orbitalSpeed: 950, color: SIMD4<Float>(0.50, 0.50, 0.48, 1))
 
         // TODO: Render tiny irregular moons as particles or orbit markers instead of full N-body bodies.
-
-        if includeAsteroids {
-            let asteroidCount = 600
-            for index in 0..<asteroidCount {
-                let angle = Double(index) / Double(asteroidCount) * Double.pi * 2
-                let orbitalRadiusAU = Double.random(in: 2.2...3.2)
-                let orbitalRadius = orbitalRadiusAU * au
-                let z = Double.random(in: -0.03...0.03) * au
-
-                let position = SIMD3<Double>(
-                    cos(angle) * orbitalRadius,
-                    sin(angle) * orbitalRadius,
-                    z
-                )
-
-                let speed = sqrt(SolarSystemConstants.G * SolarSystemConstants.solarMass / orbitalRadius)
-                let velocity = SIMD3<Double>(
-                    -sin(angle) * speed,
-                    cos(angle) * speed,
-                    0
-                )
-
-                result.append(
-                    CelestialBody(
-                        name: "Asteroid \(index)",
-                        mass: 1.0e15,
-                        visualRadius: Double.random(in: 50_000...200_000),
-                        position: position,
-                        velocity: velocity,
-                        color: SIMD4<Float>(0.45, 0.42, 0.38, 1),
-                        isAsteroid: true
-                    )
-                )
-            }
-        }
 
         return result
     }

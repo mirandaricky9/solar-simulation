@@ -85,18 +85,11 @@ nonisolated final class SimulationEngine {
 
     private func computeAccelerations(for snapshot: [CelestialBody]) -> [SIMD3<Double>] {
         let massiveIndices = snapshot.indices.filter { !snapshot[$0].isAsteroid && !snapshot[$0].usesParentedOrbit }
-        let asteroidIndices = snapshot.indices.filter { snapshot[$0].isAsteroid }
         var accelerations = Array(repeating: SIMD3<Double>(0, 0, 0), count: snapshot.count)
 
         for index in massiveIndices {
             for otherIndex in massiveIndices {
                 guard otherIndex != index else { continue }
-                accelerations[index] += acceleration(on: snapshot[index], from: snapshot[otherIndex])
-            }
-        }
-
-        for index in asteroidIndices {
-            for otherIndex in massiveIndices {
                 accelerations[index] += acceleration(on: snapshot[index], from: snapshot[otherIndex])
             }
         }

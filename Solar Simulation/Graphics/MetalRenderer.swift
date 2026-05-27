@@ -24,6 +24,12 @@ private struct Uniforms {
     var cameraPosition: SIMD4<Float>
 }
 
+private struct MeshResource {
+    var vertexBuffer: MTLBuffer
+    var indexBuffer: MTLBuffer
+    var indexCount: Int
+}
+
 private enum ScaleMode {
     case compact
     case balanced
@@ -35,6 +41,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     private static let defaultYaw: Float = 0
     private static let defaultPitch: Float = -Float.pi / 2
     private static let dynamicBufferCount = 3
+    private static let asteroidVariantCount = 12
 
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
@@ -50,17 +57,21 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     private var highDetailSphereIndexBuffer: MTLBuffer?
     private var highDetailSphereIndexCount = 0
 
-    private var lowDetailSphereVertexBuffer: MTLBuffer?
-    private var lowDetailSphereIndexBuffer: MTLBuffer?
-    private var lowDetailSphereIndexCount = 0
+    private var asteroidMeshVariants: [MeshResource] = []
 
     private var majorBodyInstanceBuffers = Array<MTLBuffer?>(repeating: nil, count: MetalRenderer.dynamicBufferCount)
     private var majorBodyInstanceCapacities = Array(repeating: 0, count: MetalRenderer.dynamicBufferCount)
     private var majorBodyInstanceCount = 0
 
-    private var asteroidInstanceBuffers = Array<MTLBuffer?>(repeating: nil, count: MetalRenderer.dynamicBufferCount)
-    private var asteroidInstanceCapacities = Array(repeating: 0, count: MetalRenderer.dynamicBufferCount)
-    private var asteroidInstanceCount = 0
+    private var asteroidVariantInstanceBuffers = Array(
+        repeating: Array<MTLBuffer?>(repeating: nil, count: MetalRenderer.dynamicBufferCount),
+        count: MetalRenderer.asteroidVariantCount
+    )
+    private var asteroidVariantInstanceCapacities = Array(
+        repeating: Array(repeating: 0, count: MetalRenderer.dynamicBufferCount),
+        count: MetalRenderer.asteroidVariantCount
+    )
+    private var asteroidVariantInstanceCounts = Array(repeating: 0, count: MetalRenderer.asteroidVariantCount)
 
     private var pathVertexBuffers = Array<MTLBuffer?>(repeating: nil, count: MetalRenderer.dynamicBufferCount)
     private var pathVertexCapacities = Array(repeating: 0, count: MetalRenderer.dynamicBufferCount)
@@ -197,15 +208,13 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         highDetailSphereIndexBuffer = highDetailSphere.indexBuffer
         highDetailSphereIndexCount = highDetailSphere.indexCount
 
-        let lowDetailSphere = createSphereMesh(
-            latitudeSegments: 6,
-            longitudeSegments: 12,
-            vertexBufferLabel: "Low Detail Sphere Vertex Buffer",
-            indexBufferLabel: "Low Detail Sphere Index Buffer"
-        )
-        lowDetailSphereVertexBuffer = lowDetailSphere.vertexBuffer
-        lowDetailSphereIndexBuffer = lowDetailSphere.indexBuffer
-        lowDetailSphereIndexCount = lowDetailSphere.indexCount
+        asteroidMeshVariants = (0..<Self.asteroidVariantCount).map { variant in
+            createIrregularAsteroidMesh(
+                latitudeSegments: 5,
+                longitudeSegments: 10,
+                seed: 0xA511_E901_D00D_0000 &+ UInt64(variant)
+            )
+        }
 
         calculateProjectionMatrix(drawableSize: mtkView.drawableSize)
         updateBodies(viewModel.bodies)
@@ -269,6 +278,11 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
 
         if let latestBodies = viewModel?.bodies {
             updateBodies(latestBodies)
+        }
+        if let viewModel {
+            updateAsteroidInstances(from: viewModel.asteroidField, currentTime: viewModel.currentTime)
+        } else {
+            asteroidVariantInstanceCounts = Array(repeating: 0, count: Self.asteroidVariantCount)
         }
 
         guard let descriptor = view.currentRenderPassDescriptor,
@@ -362,13 +376,105 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         return (vertexBuffer, indexBuffer, indices.count)
     }
 
+    private func createIrregularAsteroidMesh(
+        latitudeSegments: Int,
+        longitudeSegments: Int,
+        seed: UInt64
+    ) -> MeshResource {
+        let latitudeSegments = max(latitudeSegments, 3)
+        let longitudeSegments = max(longitudeSegments, 3)
+        let verticesPerRow = longitudeSegments + 1
+        let stretch = SIMD3<Float>(
+            0.78 + Self.deterministicUnitFloat(seed: seed, a: 1, b: 0) * 0.58,
+            0.78 + Self.deterministicUnitFloat(seed: seed, a: 2, b: 0) * 0.58,
+            0.70 + Self.deterministicUnitFloat(seed: seed, a: 3, b: 0) * 0.46
+        )
+
+        var vertices: [SphereVertex] = []
+        vertices.reserveCapacity((latitudeSegments + 1) * verticesPerRow)
+
+        for latitude in 0...latitudeSegments {
+            let v = Float(latitude) / Float(latitudeSegments)
+            let theta = v * Float.pi
+            let sinTheta = sin(theta)
+            let cosTheta = cos(theta)
+
+            for longitude in 0...longitudeSegments {
+                let u = Float(longitude) / Float(longitudeSegments)
+                let phi = u * Float.pi * 2
+                let normal = simd_normalize(
+                    SIMD3<Float>(
+                        sinTheta * cos(phi),
+                        sinTheta * sin(phi),
+                        cosTheta
+                    )
+                )
+                let coarseNoise = Self.deterministicUnitFloat(seed: seed, a: latitude, b: longitude)
+                let ridgeNoise = Self.deterministicUnitFloat(seed: seed, a: latitude * 7 + 11, b: longitude * 5 + 23)
+                let radialScale = 0.65 + coarseNoise * 0.55 + ridgeNoise * 0.15
+                let position = normal * radialScale * stretch
+
+                vertices.append(SphereVertex(position: position, normal: simd_normalize(position)))
+            }
+        }
+
+        var indices: [UInt16] = []
+        indices.reserveCapacity(latitudeSegments * longitudeSegments * 6)
+
+        for latitude in 0..<latitudeSegments {
+            for longitude in 0..<longitudeSegments {
+                let current = latitude * verticesPerRow + longitude
+                let next = current + verticesPerRow
+
+                indices.append(UInt16(current))
+                indices.append(UInt16(next))
+                indices.append(UInt16(current + 1))
+
+                indices.append(UInt16(current + 1))
+                indices.append(UInt16(next))
+                indices.append(UInt16(next + 1))
+            }
+        }
+
+        guard let vertexBuffer = device.makeBuffer(
+            bytes: vertices,
+            length: MemoryLayout<SphereVertex>.stride * vertices.count,
+            options: .storageModeShared
+        ) else {
+            fatalError("Could not create asteroid vertex buffer.")
+        }
+        vertexBuffer.label = "Irregular Asteroid Vertex Buffer"
+
+        guard let indexBuffer = device.makeBuffer(
+            bytes: indices,
+            length: MemoryLayout<UInt16>.stride * indices.count,
+            options: .storageModeShared
+        ) else {
+            fatalError("Could not create asteroid index buffer.")
+        }
+        indexBuffer.label = "Irregular Asteroid Index Buffer"
+
+        return MeshResource(vertexBuffer: vertexBuffer, indexBuffer: indexBuffer, indexCount: indices.count)
+    }
+
+    private static func deterministicUnitFloat(seed: UInt64, a: Int, b: Int) -> Float {
+        var value = seed
+        value ^= UInt64(bitPattern: Int64(a)) &* 0x9E37_79B9_7F4A_7C15
+        value ^= UInt64(bitPattern: Int64(b)) &* 0xBF58_476D_1CE4_E5B9
+        value ^= value >> 30
+        value &*= 0xBF58_476D_1CE4_E5B9
+        value ^= value >> 27
+        value &*= 0x94D0_49BB_1331_11EB
+        value ^= value >> 31
+        return Float(value & 0x00FF_FFFF) / Float(0x00FF_FFFF)
+    }
+
     private func rebuildBodyInstanceBuffer(from bodies: [CelestialBody]) {
         if let star = bodies.first(where: \.isStar) {
             lightPosition = toRenderPosition(star.position)
         }
 
         majorBodyInstanceCount = bodies.reduce(0) { $0 + ($1.isAsteroid ? 0 : 1) }
-        asteroidInstanceCount = bodies.count - majorBodyInstanceCount
 
         Self.ensureBodyInstanceBuffer(
             device: device,
@@ -378,41 +484,23 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             requiredCount: majorBodyInstanceCount,
             label: "Major Body Instance Buffer"
         )
-        Self.ensureBodyInstanceBuffer(
-            device: device,
-            buffers: &asteroidInstanceBuffers,
-            capacities: &asteroidInstanceCapacities,
-            bufferIndex: dynamicBufferIndex,
-            requiredCount: asteroidInstanceCount,
-            label: "Asteroid Instance Buffer"
-        )
 
         let majorBodyPointer = majorBodyInstanceBuffers[dynamicBufferIndex]?.contents().bindMemory(
             to: BodyInstance.self,
             capacity: majorBodyInstanceCapacities[dynamicBufferIndex]
         )
-        let asteroidPointer = asteroidInstanceBuffers[dynamicBufferIndex]?.contents().bindMemory(
-            to: BodyInstance.self,
-            capacity: asteroidInstanceCapacities[dynamicBufferIndex]
-        )
 
         var majorBodyIndex = 0
-        var asteroidIndex = 0
 
-        for body in bodies {
+        for body in bodies where !body.isAsteroid {
             let instance = BodyInstance(
                 positionRadius: SIMD4<Float>(toRenderPosition(body), visualRadius(for: body)),
                 color: body.color,
                 material: SIMD4<Float>(body.isStar ? 1 : 0, 0, 0, 0)
             )
 
-            if body.isAsteroid {
-                asteroidPointer?[asteroidIndex] = instance
-                asteroidIndex += 1
-            } else {
-                majorBodyPointer?[majorBodyIndex] = instance
-                majorBodyIndex += 1
-            }
+            majorBodyPointer?[majorBodyIndex] = instance
+            majorBodyIndex += 1
         }
     }
 
@@ -519,6 +607,72 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         }
     }
 
+    private func updateAsteroidInstances(from field: AsteroidField, currentTime: Double) {
+        asteroidVariantInstanceCounts = Array(repeating: 0, count: Self.asteroidVariantCount)
+
+        guard !field.asteroids.isEmpty else { return }
+
+        for asteroid in field.asteroids {
+            let variant = clampedAsteroidVariant(asteroid.meshVariant)
+            asteroidVariantInstanceCounts[variant] += 1
+        }
+
+        for variant in 0..<Self.asteroidVariantCount where asteroidVariantInstanceCounts[variant] > 0 {
+            Self.ensureBodyInstanceBuffer(
+                device: device,
+                buffers: &asteroidVariantInstanceBuffers[variant],
+                capacities: &asteroidVariantInstanceCapacities[variant],
+                bufferIndex: dynamicBufferIndex,
+                requiredCount: asteroidVariantInstanceCounts[variant],
+                label: "Asteroid Variant \(variant) Instance Buffer"
+            )
+        }
+
+        var pointers = Array<UnsafeMutablePointer<BodyInstance>?>(repeating: nil, count: Self.asteroidVariantCount)
+        for variant in 0..<Self.asteroidVariantCount where asteroidVariantInstanceCounts[variant] > 0 {
+            pointers[variant] = asteroidVariantInstanceBuffers[variant][dynamicBufferIndex]?.contents().bindMemory(
+                to: BodyInstance.self,
+                capacity: asteroidVariantInstanceCapacities[variant][dynamicBufferIndex]
+            )
+        }
+
+        var writeIndices = Array(repeating: 0, count: Self.asteroidVariantCount)
+        let radiusScale = bodySizeMultiplier / pow(max(zoom, 1.0), zoomRadiusFalloff)
+
+        for asteroid in field.asteroids {
+            let variant = clampedAsteroidVariant(asteroid.meshVariant)
+            let index = writeIndices[variant]
+            writeIndices[variant] += 1
+
+            pointers[variant]?[index] = BodyInstance(
+                positionRadius: SIMD4<Float>(
+                    asteroidPosition(for: asteroid, currentTime: currentTime),
+                    asteroid.sizeAU * radiusScale
+                ),
+                color: asteroid.color,
+                material: SIMD4<Float>(0, 0, 0, 0)
+            )
+        }
+    }
+
+    private func asteroidPosition(for asteroid: AsteroidVisualInstance, currentTime: Double) -> SIMD3<Float> {
+        let angle = Double(asteroid.initialAngle) + Double(asteroid.angularSpeed) * currentTime
+        let eccentricity = Double(asteroid.eccentricity)
+        let radius = Double(asteroid.orbitRadiusAU) * (1 - eccentricity * cos(angle))
+        let inclination = Double(asteroid.inclination)
+        let x = cos(angle) * radius
+        let flatY = sin(angle) * radius
+        let y = flatY * cos(inclination)
+        let inclinedZ = flatY * sin(inclination)
+        let verticalWave = sin(angle + Double(asteroid.initialRotation)) * Double(asteroid.verticalOffsetAU)
+
+        return SIMD3<Float>(Float(x), Float(y), Float(inclinedZ + verticalWave))
+    }
+
+    private func clampedAsteroidVariant(_ variant: Int) -> Int {
+        min(max(variant, 0), Self.asteroidVariantCount - 1)
+    }
+
     private static func ensureBodyInstanceBuffer(
         device: MTLDevice,
         buffers: inout [MTLBuffer?],
@@ -584,14 +738,18 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             instanceBuffer: majorBodyInstanceBuffers[dynamicBufferIndex],
             instanceCount: majorBodyInstanceCount
         )
-        drawInstancedBodies(
-            encoder: encoder,
-            vertexBuffer: lowDetailSphereVertexBuffer,
-            indexBuffer: lowDetailSphereIndexBuffer,
-            indexCount: lowDetailSphereIndexCount,
-            instanceBuffer: asteroidInstanceBuffers[dynamicBufferIndex],
-            instanceCount: asteroidInstanceCount
-        )
+
+        for variant in 0..<min(asteroidMeshVariants.count, Self.asteroidVariantCount) {
+            let mesh = asteroidMeshVariants[variant]
+            drawInstancedBodies(
+                encoder: encoder,
+                vertexBuffer: mesh.vertexBuffer,
+                indexBuffer: mesh.indexBuffer,
+                indexCount: mesh.indexCount,
+                instanceBuffer: asteroidVariantInstanceBuffers[variant][dynamicBufferIndex],
+                instanceCount: asteroidVariantInstanceCounts[variant]
+            )
+        }
     }
 
     private func drawInstancedBodies(
