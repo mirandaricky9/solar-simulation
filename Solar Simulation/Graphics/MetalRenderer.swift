@@ -23,6 +23,15 @@ private struct CometBillboardInstance {
     var color: SIMD4<Float>
 }
 
+private struct PickableObject {
+    let id: UUID
+    let name: String
+    let kind: CelestialObjectKind
+    let worldPositionAU: SIMD3<Float>
+    let renderRadiusAU: Float
+    let priority: Int
+}
+
 private struct Uniforms {
     var viewProjectionMatrix: simd_float4x4
     var lightPosition: SIMD4<Float>
@@ -106,6 +115,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     private var dynamicBufferIndex = 0
 
     private var currentBodies: [CelestialBody] = []
+    private var pickableObjects: [PickableObject] = []
     private var worldViewProjectionMatrix = matrix_identity_float4x4
     private var lightPosition = SIMD3<Float>(0, 0, 0)
 
@@ -132,6 +142,8 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
 
     private var bodySizeMultiplier: Float = 1.0
     private var cameraSensitivityMultiplier: Float = 1.0
+    var onObjectSelected: ((String) -> Void)?
+    var onEmptySelection: (() -> Void)?
     private let scaleMode: ScaleMode = .balanced
 
     private let sunVisualRadiusAU: Float = 0.08
@@ -271,6 +283,51 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         }
     }
 
+    func selectObject(at point: CGPoint, in view: MTKView) {
+        guard !pickableObjects.isEmpty else {
+            onEmptySelection?()
+            return
+        }
+
+        let drawableWidth = max(Float(view.drawableSize.width), 1)
+        let drawableHeight = max(Float(view.drawableSize.height), 1)
+        let boundsWidth = max(Float(view.bounds.width), 1)
+        let boundsHeight = max(Float(view.bounds.height), 1)
+        let clickPosition = SIMD2<Float>(
+            Float(point.x) * drawableWidth / boundsWidth,
+            (boundsHeight - Float(point.y)) * drawableHeight / boundsHeight
+        )
+
+        var bestHit: (object: PickableObject, distance: Float)?
+
+        for object in pickableObjects {
+            guard let projected = projectToScreen(object, drawableWidth: drawableWidth, drawableHeight: drawableHeight) else {
+                continue
+            }
+
+            let distance = simd_length(projected.position - clickPosition)
+            let pickRadius = max(12, min(52, projected.radius + 8))
+            guard distance <= pickRadius else { continue }
+
+            if let currentBest = bestHit {
+                let isClearlyCloser = distance < currentBest.distance - 4
+                let isSimilarDistanceWithHigherPriority = abs(distance - currentBest.distance) <= 4 && object.priority > currentBest.object.priority
+
+                if isClearlyCloser || isSimilarDistanceWithHigherPriority {
+                    bestHit = (object, distance)
+                }
+            } else {
+                bestHit = (object, distance)
+            }
+        }
+
+        if let bestHit {
+            onObjectSelected?(bestHit.object.name)
+        } else {
+            onEmptySelection?()
+        }
+    }
+
     func setZoom(_ newZoom: Float) {
         guard newZoom.isFinite else { return }
 
@@ -324,13 +381,14 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             updateBodies(latestBodies)
         }
         if let viewModel {
+            let cometInstances = viewModel.showComets ? viewModel.cometField.instances(at: viewModel.currentTime) : []
             updateAsteroidInstances(from: viewModel.asteroidField, currentTime: viewModel.currentTime)
-            updateCometInstances(
-                from: viewModel.showComets ? viewModel.cometField.instances(at: viewModel.currentTime) : []
-            )
+            updateCometInstances(from: cometInstances)
+            rebuildPickableObjects(from: currentBodies, viewModel: viewModel, cometInstances: cometInstances)
         } else {
             asteroidVariantInstanceCounts = Array(repeating: 0, count: Self.asteroidVariantCount)
             updateCometInstances(from: [])
+            pickableObjects = []
         }
 
         guard let descriptor = view.currentRenderPassDescriptor,
@@ -654,6 +712,123 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         for index in vertices.indices {
             pointer[index] = vertices[index]
         }
+    }
+
+    private func rebuildPickableObjects(
+        from bodies: [CelestialBody],
+        viewModel: SimulationViewModel,
+        cometInstances: [CometVisualInstance]
+    ) {
+        var objects: [PickableObject] = []
+        objects.reserveCapacity(bodies.count + cometInstances.count + 1)
+
+        for body in bodies where !body.isAsteroid {
+            objects.append(
+                PickableObject(
+                    id: body.id,
+                    name: body.name,
+                    kind: body.kind,
+                    worldPositionAU: toRenderPosition(body),
+                    renderRadiusAU: visualRadius(for: body),
+                    priority: pickPriority(for: body.kind)
+                )
+            )
+        }
+
+        for instance in cometInstances {
+            objects.append(
+                PickableObject(
+                    id: instance.definition.id,
+                    name: instance.definition.name,
+                    kind: .comet,
+                    worldPositionAU: instance.positionAU,
+                    renderRadiusAU: max(instance.nucleusRadiusAU, instance.comaRadiusAU * 0.25),
+                    priority: pickPriority(for: .comet)
+                )
+            )
+        }
+
+        if !viewModel.asteroidField.asteroids.isEmpty {
+            objects.append(
+                PickableObject(
+                    id: UUID(uuidString: "D78A4AF8-711E-4B56-9E33-5AFD02909346")!,
+                    name: "Asteroid Belt",
+                    kind: .asteroidBelt,
+                    worldPositionAU: SIMD3<Float>(2.7, 0, 0),
+                    renderRadiusAU: 0.25,
+                    priority: pickPriority(for: .asteroidBelt)
+                )
+            )
+        }
+
+        pickableObjects = objects
+    }
+
+    private func pickPriority(for kind: CelestialObjectKind) -> Int {
+        switch kind {
+        case .moon:
+            return 100
+        case .comet:
+            return 90
+        case .planet, .dwarfPlanet:
+            return 80
+        case .star:
+            return 10
+        case .asteroidBelt:
+            return 1
+        case .asteroid:
+            return 1
+        case .unknown:
+            return 0
+        }
+    }
+
+    private func projectToScreen(
+        _ object: PickableObject,
+        drawableWidth: Float,
+        drawableHeight: Float
+    ) -> (position: SIMD2<Float>, radius: Float)? {
+        let position = object.worldPositionAU
+        let clip = worldViewProjectionMatrix * SIMD4<Float>(position, 1)
+        guard clip.w.isFinite, clip.w > 0.000001 else { return nil }
+
+        let ndc = SIMD3<Float>(clip.x / clip.w, clip.y / clip.w, clip.z / clip.w)
+        guard ndc.x.isFinite, ndc.y.isFinite, ndc.z.isFinite else { return nil }
+        guard ndc.x >= -1.05, ndc.x <= 1.05, ndc.y >= -1.05, ndc.y <= 1.05 else { return nil }
+
+        let screenPosition = SIMD2<Float>(
+            (ndc.x * 0.5 + 0.5) * drawableWidth,
+            (1 - (ndc.y * 0.5 + 0.5)) * drawableHeight
+        )
+        let radius = projectedRadiusPixels(for: object, drawableWidth: drawableWidth, drawableHeight: drawableHeight)
+
+        return (screenPosition, radius)
+    }
+
+    private func projectedRadiusPixels(
+        for object: PickableObject,
+        drawableWidth: Float,
+        drawableHeight: Float
+    ) -> Float {
+        let position = object.worldPositionAU
+        let offsetPosition = position + SIMD3<Float>(max(object.renderRadiusAU, 0.001), 0, 0)
+        let centerClip = worldViewProjectionMatrix * SIMD4<Float>(position, 1)
+        let edgeClip = worldViewProjectionMatrix * SIMD4<Float>(offsetPosition, 1)
+        guard centerClip.w > 0.000001, edgeClip.w > 0.000001 else { return 0 }
+
+        let centerNDC = SIMD2<Float>(centerClip.x / centerClip.w, centerClip.y / centerClip.w)
+        let edgeNDC = SIMD2<Float>(edgeClip.x / edgeClip.w, edgeClip.y / edgeClip.w)
+        guard centerNDC.x.isFinite, centerNDC.y.isFinite, edgeNDC.x.isFinite, edgeNDC.y.isFinite else { return 0 }
+        let centerScreen = SIMD2<Float>(
+            (centerNDC.x * 0.5 + 0.5) * drawableWidth,
+            (1 - (centerNDC.y * 0.5 + 0.5)) * drawableHeight
+        )
+        let edgeScreen = SIMD2<Float>(
+            (edgeNDC.x * 0.5 + 0.5) * drawableWidth,
+            (1 - (edgeNDC.y * 0.5 + 0.5)) * drawableHeight
+        )
+
+        return simd_length(edgeScreen - centerScreen)
     }
 
     private func updateAsteroidInstances(from field: AsteroidField, currentTime: Double) {

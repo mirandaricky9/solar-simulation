@@ -28,6 +28,10 @@ struct ControlPanel: View {
 
             Toggle("Orbit Paths", isOn: $viewModel.showPretracedOrbitPaths)
 
+            Button("Clear Trails") {
+                viewModel.clearTrails()
+            }
+
             Text("Speed")
 
             Slider(value: $viewModel.simulatedDaysPerSecond, in: 0.25...100, step: 0.25)

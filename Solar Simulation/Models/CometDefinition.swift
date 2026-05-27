@@ -22,7 +22,6 @@ nonisolated struct CometDefinition: Identifiable, Sendable {
     }
 
     var meanMotionRadiansPerSecond: Double {
-        let secondsPerYear = 365.25 * 86_400.0
-        return 2.0 * Double.pi / (periodYears * secondsPerYear)
+        2.0 * Double.pi / SolarSystemConstants.yearsToSeconds(periodYears)
     }
 }

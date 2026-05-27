@@ -5,8 +5,17 @@ struct SolarSystemView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            SimulationViewContainer(viewModel: viewModel)
-                .frame(minWidth: 900, minHeight: 650)
+            ZStack(alignment: .topTrailing) {
+                SimulationViewContainer(viewModel: viewModel)
+
+                if let info = viewModel.selectedObjectInfo {
+                    SelectedObjectInfoPanel(info: info) {
+                        viewModel.clearSelection()
+                    }
+                    .padding()
+                }
+            }
+            .frame(minWidth: 900, minHeight: 650)
 
             Divider()
 

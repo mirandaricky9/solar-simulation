@@ -39,4 +39,12 @@ actor SimulationWorker {
     func snapshot() -> [CelestialBody] {
         bodies
     }
+
+    func clearTrails() -> [CelestialBody] {
+        for index in bodies.indices {
+            bodies[index].cumulativePosition.removeAll(keepingCapacity: true)
+        }
+
+        return bodies
+    }
 }

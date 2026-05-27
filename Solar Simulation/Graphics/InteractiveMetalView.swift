@@ -5,8 +5,10 @@ final class InteractiveMetalView: MTKView {
     var onScroll: ((Float) -> Void)?
     var onDrag: ((Float, Float) -> Void)?
     var onResetCamera: (() -> Void)?
+    var onClick: ((CGPoint) -> Void)?
 
     private var lastDragLocation: NSPoint?
+    private var mouseDownLocation: NSPoint?
     private var pressedCameraKeys: Set<UInt16> = []
 
     var keyboardMovementInput: SIMD2<Float> {
@@ -108,7 +110,9 @@ final class InteractiveMetalView: MTKView {
 
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
-        lastDragLocation = convert(event.locationInWindow, from: nil)
+        let location = convert(event.locationInWindow, from: nil)
+        mouseDownLocation = location
+        lastDragLocation = location
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -124,6 +128,19 @@ final class InteractiveMetalView: MTKView {
     }
 
     override func mouseUp(with event: NSEvent) {
+        let location = convert(event.locationInWindow, from: nil)
+
+        if let mouseDownLocation {
+            let dx = location.x - mouseDownLocation.x
+            let dy = location.y - mouseDownLocation.y
+            let distance = sqrt(dx * dx + dy * dy)
+
+            if distance < 4 {
+                onClick?(location)
+            }
+        }
+
+        mouseDownLocation = nil
         lastDragLocation = nil
     }
 

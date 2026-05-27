@@ -3,8 +3,11 @@ import simd
 
 nonisolated final class SimulationEngine {
     private var stepCounter = 0
-    private let trailSampleInterval = 8
-    private let maxTrailPoints = 1_000
+    private let trailSampleInterval = 12
+    private let planetTrailPointLimit = 100_000
+    private let moonTrailPointLimit = 5_000
+    private let planetTrailMinimumDistance = SolarSystemConstants.astronomicalUnit * 0.002
+    private let moonTrailMinimumDistance = SolarSystemConstants.astronomicalUnit * 0.00005
 
     func reset() {
         stepCounter = 0
@@ -67,20 +70,43 @@ nonisolated final class SimulationEngine {
     }
 
     private func updateTrails(for bodies: inout [CelestialBody]) {
-        // These are bounded recent-motion trails; full orbit rings are rendered separately.
+        // These are live path histories; static/pretraced orbit rings are rendered separately.
         for index in bodies.indices {
-            if !bodies[index].showsTrail {
+            let limit = maxTrailPoints(for: bodies[index])
+
+            if limit == 0 {
                 if !bodies[index].cumulativePosition.isEmpty {
                     bodies[index].cumulativePosition.removeAll(keepingCapacity: false)
                 }
-            } else if stepCounter % trailSampleInterval == 0 {
+            } else if stepCounter % trailSampleInterval == 0 && shouldAppendTrailPoint(for: bodies[index]) {
                 bodies[index].cumulativePosition.append(bodies[index].position)
 
-                if bodies[index].cumulativePosition.count > maxTrailPoints {
-                    bodies[index].cumulativePosition.removeFirst(bodies[index].cumulativePosition.count - maxTrailPoints)
+                if bodies[index].cumulativePosition.count > limit {
+                    bodies[index].cumulativePosition.removeFirst(bodies[index].cumulativePosition.count - limit)
                 }
             }
         }
+    }
+
+    private func maxTrailPoints(for body: CelestialBody) -> Int {
+        guard body.showsTrail, !body.isAsteroid, !body.isStar else {
+            return 0
+        }
+
+        if body.isMoon {
+            return moonTrailPointLimit
+        }
+
+        return planetTrailPointLimit
+    }
+
+    private func shouldAppendTrailPoint(for body: CelestialBody) -> Bool {
+        guard let lastPosition = body.cumulativePosition.last else {
+            return true
+        }
+
+        let minimumDistance = body.isMoon ? moonTrailMinimumDistance : planetTrailMinimumDistance
+        return simd_length(body.position - lastPosition) >= minimumDistance
     }
 
     private func computeAccelerations(for snapshot: [CelestialBody]) -> [SIMD3<Double>] {

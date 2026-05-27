@@ -8,6 +8,7 @@ struct CelestialBody: Identifiable, Sendable {
     let visualRadius: Double
     let initialPosition: SIMD3<Double>
     let initialVelocity: SIMD3<Double>
+    let kind: CelestialObjectKind
     let isStar: Bool
     let isMoon: Bool
     let isAsteroid: Bool
@@ -15,6 +16,7 @@ struct CelestialBody: Identifiable, Sendable {
     let parentName: String?
     let orbitalRadius: Double?
     let orbitalSpeed: Double?
+    let orbitalPeriodSeconds: Double?
     let color: SIMD4<Float>
 
     var position: SIMD3<Double>
@@ -33,6 +35,7 @@ struct CelestialBody: Identifiable, Sendable {
         position: SIMD3<Double>,
         velocity: SIMD3<Double>,
         color: SIMD4<Float>,
+        kind: CelestialObjectKind? = nil,
         isStar: Bool = false,
         isMoon: Bool = false,
         isAsteroid: Bool = false,
@@ -40,6 +43,7 @@ struct CelestialBody: Identifiable, Sendable {
         parentName: String? = nil,
         orbitalRadius: Double? = nil,
         orbitalSpeed: Double? = nil,
+        orbitalPeriodSeconds: Double? = nil,
         orbitalPhase: Double? = nil
     ) {
         self.name = name
@@ -50,6 +54,7 @@ struct CelestialBody: Identifiable, Sendable {
         self.position = position
         self.velocity = velocity
         self.color = color
+        self.kind = kind ?? Self.defaultKind(isStar: isStar, isMoon: isMoon, isAsteroid: isAsteroid)
         self.isStar = isStar
         self.isMoon = isMoon
         self.isAsteroid = isAsteroid
@@ -57,6 +62,23 @@ struct CelestialBody: Identifiable, Sendable {
         self.parentName = parentName
         self.orbitalRadius = orbitalRadius
         self.orbitalSpeed = orbitalSpeed
+        self.orbitalPeriodSeconds = orbitalPeriodSeconds
         self.orbitalPhase = orbitalPhase
+    }
+
+    private static func defaultKind(isStar: Bool, isMoon: Bool, isAsteroid: Bool) -> CelestialObjectKind {
+        if isStar {
+            return .star
+        }
+
+        if isMoon {
+            return .moon
+        }
+
+        if isAsteroid {
+            return .asteroid
+        }
+
+        return .planet
     }
 }

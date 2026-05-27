@@ -22,8 +22,19 @@ struct SimulationViewContainer: NSViewRepresentable {
         mtkView.enableSetNeedsDisplay = false
         mtkView.isPaused = false
 
+        let selectionViewModel = viewModel
         let renderer = MetalRenderer(mtkView: mtkView, viewModel: viewModel)
         renderer.setCameraSensitivityMultiplier(Float(viewModel.cameraSensitivity))
+        renderer.onObjectSelected = { [weak selectionViewModel] selectedName in
+            Task { @MainActor in
+                selectionViewModel?.selectObject(named: selectedName)
+            }
+        }
+        renderer.onEmptySelection = { [weak selectionViewModel] in
+            Task { @MainActor in
+                selectionViewModel?.clearSelection()
+            }
+        }
         context.coordinator.renderer = renderer
         mtkView.delegate = renderer
 
@@ -37,6 +48,11 @@ struct SimulationViewContainer: NSViewRepresentable {
 
         mtkView.onResetCamera = { [weak renderer] in
             renderer?.resetCamera()
+        }
+
+        mtkView.onClick = { [weak renderer, weak mtkView] point in
+            guard let mtkView else { return }
+            renderer?.selectObject(at: point, in: mtkView)
         }
 
         return mtkView

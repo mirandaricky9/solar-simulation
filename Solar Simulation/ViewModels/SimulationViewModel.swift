@@ -15,6 +15,7 @@ final class SimulationViewModel: ObservableObject {
     @Published var showComets = true
     @Published var showLiveTrails = true
     @Published var showPretracedOrbitPaths = true
+    @Published var selectedObjectInfo: SelectedObjectInfo?
     @Published private(set) var cameraResetRequestID = 0
     @Published private(set) var asteroidField = AsteroidField(count: 0)
     let cometField = CometVisualField()
@@ -25,11 +26,13 @@ final class SimulationViewModel: ObservableObject {
     private var accumulatedTime: Double = 0
     private var accumulatedSimulationDebt: Double = 0
     private var lastFrameTime: CFTimeInterval?
+    private var selectedObjectName: String?
     private let fixedPhysicsStepSeconds: Double = 3_600
     private let maxSubstepsPerFrame = 32
     private let simulationFrameIntervalNanoseconds: UInt64 = 16_666_667
     private let publishedSnapshotInterval = 2
     private let defaultAsteroidVisualCount = 8_000
+    private let asteroidBeltSelectionID = UUID(uuidString: "D78A4AF8-711E-4B56-9E33-5AFD02909346")!
 
     init() {
         reset()
@@ -54,6 +57,7 @@ final class SimulationViewModel: ObservableObject {
 
         let newBodies = Self.makeInitialBodies()
         bodies = newBodies
+        updateSelectedObjectInfo()
         cameraResetRequestID += 1
 
         workerSyncTask = Task { [simulationWorker] in
@@ -80,8 +84,51 @@ final class SimulationViewModel: ObservableObject {
                 self.accumulatedTime += dt
                 self.currentTime = self.accumulatedTime
                 self.bodies = steppedBodies
+                self.updateSelectedObjectInfo()
             }
         }
+    }
+
+    func clearTrails() {
+        Task { [simulationWorker] in
+            let updatedBodies = await simulationWorker.clearTrails()
+
+            await MainActor.run {
+                self.bodies = updatedBodies
+                self.updateSelectedObjectInfo()
+            }
+        }
+    }
+
+    func selectObject(named name: String) {
+        selectedObjectName = name
+        updateSelectedObjectInfo()
+    }
+
+    func clearSelection() {
+        selectedObjectName = nil
+        selectedObjectInfo = nil
+    }
+
+    func updateSelectedObjectInfo() {
+        guard let selectedObjectName else { return }
+
+        if let body = bodies.first(where: { $0.name == selectedObjectName }) {
+            selectedObjectInfo = makeSelectedInfo(for: body, bodies: bodies)
+            return
+        }
+
+        if let comet = cometField.definitions.first(where: { $0.name == selectedObjectName || $0.shortName == selectedObjectName }) {
+            selectedObjectInfo = makeSelectedInfo(for: comet, simulationTime: currentTime)
+            return
+        }
+
+        if selectedObjectName == "Asteroid Belt" {
+            selectedObjectInfo = makeAsteroidBeltInfo()
+            return
+        }
+
+        selectedObjectInfo = nil
     }
 
     private func startSimulationLoop() {
@@ -130,6 +177,7 @@ final class SimulationViewModel: ObservableObject {
                         self.accumulatedTime += simulatedTimeAdvanced
                         self.currentTime = self.accumulatedTime
                         self.bodies = steppedBodies
+                        self.updateSelectedObjectInfo()
                     } else {
                         await self.simulationWorker.advanceWithoutSnapshot(
                             substeps: substeps,
@@ -152,6 +200,132 @@ final class SimulationViewModel: ObservableObject {
         simulationTask = nil
         isRunning = false
         lastFrameTime = nil
+    }
+
+    private func makeSelectedInfo(for body: CelestialBody, bodies: [CelestialBody]) -> SelectedObjectInfo {
+        let sun = bodies.first(where: \.isStar)
+        let parent = body.parentName.flatMap { parentName in
+            bodies.first(where: { $0.name == parentName })
+        }
+        let distanceToSun = sun.map { simd_length(body.position - $0.position) }
+        let distanceToParent = parent.map { simd_length(body.position - $0.position) }
+        let speed = simd_length(body.velocity)
+        let circumference = 2 * Double.pi * body.visualRadius
+        let orbitalPeriod = body.orbitalPeriodSeconds
+            ?? body.orbitalRadius.flatMap { radius in
+                guard let orbitalSpeed = body.orbitalSpeed, orbitalSpeed > 0 else { return nil }
+                return 2 * Double.pi * radius / orbitalSpeed
+            }
+            ?? estimateOrbitalPeriod(distanceMeters: distanceToParent ?? distanceToSun, speedMetersPerSecond: speed)
+
+        return SelectedObjectInfo(
+            id: body.id,
+            name: body.name,
+            kind: body.kind,
+            parentName: body.parentName,
+            massKg: body.mass,
+            radiusMeters: body.visualRadius,
+            circumferenceMeters: circumference,
+            distanceToSunMeters: body.isStar ? nil : distanceToSun,
+            distanceToParentMeters: distanceToParent,
+            orbitalPeriodSeconds: body.isStar ? nil : orbitalPeriod,
+            speedMetersPerSecond: speed,
+            apsisPhase: apsisPhase(for: body, primary: parent ?? sun),
+            notes: nil
+        )
+    }
+
+    private func makeSelectedInfo(for comet: CometDefinition, simulationTime: Double) -> SelectedObjectInfo {
+        let positionAU = KeplerOrbitSolver.positionAU(definition: comet, simulationTime: simulationTime)
+        let futurePositionAU = KeplerOrbitSolver.positionAU(definition: comet, simulationTime: simulationTime + 3_600)
+        let distanceToSun = Double(simd_length(positionAU)) * SolarSystemConstants.astronomicalUnit
+        let futureDistanceToSun = Double(simd_length(futurePositionAU)) * SolarSystemConstants.astronomicalUnit
+        let radius = Double(comet.nucleusRadiusAU) * SolarSystemConstants.astronomicalUnit
+        let orbitalPeriod = SolarSystemConstants.yearsToSeconds(comet.periodYears)
+        let speed = cometSpeed(distanceMeters: distanceToSun, semiMajorAxisAU: comet.semiMajorAxisAU)
+        let apsisPhase: ApsisPhase
+
+        if abs(futureDistanceToSun - distanceToSun) < 1_000 {
+            apsisPhase = .unknown
+        } else {
+            apsisPhase = futureDistanceToSun > distanceToSun ? .movingTowardAphelion : .movingTowardPerihelion
+        }
+
+        return SelectedObjectInfo(
+            id: comet.id,
+            name: comet.name,
+            kind: .comet,
+            parentName: "Sun",
+            massKg: nil,
+            radiusMeters: radius,
+            circumferenceMeters: 2 * Double.pi * radius,
+            distanceToSunMeters: distanceToSun,
+            distanceToParentMeters: nil,
+            orbitalPeriodSeconds: orbitalPeriod,
+            speedMetersPerSecond: speed,
+            apsisPhase: apsisPhase,
+            notes: "Analytic visual comet; not N-body simulated."
+        )
+    }
+
+    private func makeAsteroidBeltInfo() -> SelectedObjectInfo {
+        SelectedObjectInfo(
+            id: asteroidBeltSelectionID,
+            name: "Asteroid Belt",
+            kind: .asteroidBelt,
+            parentName: "Sun",
+            massKg: nil,
+            radiusMeters: nil,
+            circumferenceMeters: nil,
+            distanceToSunMeters: 2.7 * SolarSystemConstants.astronomicalUnit,
+            distanceToParentMeters: nil,
+            orbitalPeriodSeconds: nil,
+            speedMetersPerSecond: nil,
+            apsisPhase: .notApplicable,
+            notes: "Aesthetic asteroid field; not N-body simulated. Individual asteroids use analytic visual orbits."
+        )
+    }
+
+    private func estimateOrbitalPeriod(distanceMeters: Double?, speedMetersPerSecond: Double) -> Double? {
+        guard let distanceMeters, speedMetersPerSecond > 0 else { return nil }
+        return 2 * Double.pi * distanceMeters / speedMetersPerSecond
+    }
+
+    private func cometSpeed(distanceMeters: Double, semiMajorAxisAU: Double) -> Double? {
+        let semiMajorAxisMeters = semiMajorAxisAU * SolarSystemConstants.astronomicalUnit
+        guard distanceMeters > 0, semiMajorAxisMeters > 0 else { return nil }
+
+        let mu = SolarSystemConstants.G * SolarSystemConstants.solarMass
+        let speedSquared = mu * (2 / distanceMeters - 1 / semiMajorAxisMeters)
+        guard speedSquared.isFinite, speedSquared > 0 else { return nil }
+
+        return sqrt(speedSquared)
+    }
+
+    private func apsisPhase(for body: CelestialBody, primary: CelestialBody?) -> ApsisPhase {
+        guard !body.isStar, let primary else { return .notApplicable }
+
+        let relativePosition = body.position - primary.position
+        let distance = simd_length(relativePosition)
+        guard distance > 0 else { return .unknown }
+
+        let relativeVelocity = body.velocity - primary.velocity
+        let radialVelocity = simd_dot(relativePosition, relativeVelocity) / distance
+        let threshold = 1.0
+
+        if abs(radialVelocity) <= threshold {
+            return .unknown
+        }
+
+        if body.isMoon {
+            if body.parentName == "Earth" && body.name == "Moon" {
+                return radialVelocity > 0 ? .movingTowardApogee : .movingTowardPerigee
+            }
+
+            return radialVelocity > 0 ? .movingTowardApoapsis : .movingTowardPeriapsis
+        }
+
+        return radialVelocity > 0 ? .movingTowardAphelion : .movingTowardPerihelion
     }
 
     private var simulatedSecondsPerRealSecond: Double {
@@ -198,7 +372,8 @@ final class SimulationViewModel: ObservableObject {
                     visualRadius: radius,
                     position: position,
                     velocity: velocity,
-                    color: color
+                    color: color,
+                    orbitalPeriodSeconds: SolarSystemConstants.siderealOrbitalPeriodSeconds(forPlanetNamed: name)
                 )
             )
 
@@ -276,6 +451,7 @@ final class SimulationViewModel: ObservableObject {
                 parentName: parentName,
                 orbitalRadius: distanceFromParent,
                 orbitalSpeed: orbitalSpeed,
+                orbitalPeriodSeconds: 2 * Double.pi * distanceFromParent / orbitalSpeed,
                 orbitalPhase: angle
             )
         )

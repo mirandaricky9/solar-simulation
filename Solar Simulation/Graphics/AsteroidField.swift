@@ -29,7 +29,7 @@ final class AsteroidField {
     func generate(count: Int) {
         var generator = SeededGenerator(seed: 0x6A09_E667_F3BC_C909)
         let count = max(count, 0)
-        let baseAngularSpeed = Float.pi * 2 / Float(365.25 * 86_400)
+        let baseAngularSpeed = Float.pi * 2 / Float(SolarSystemConstants.secondsPerJulianYear)
         let minSize = log(Float(0.0008))
         let maxSize = log(Float(0.006))
 
