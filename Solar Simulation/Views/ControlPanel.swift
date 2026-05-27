@@ -22,6 +22,8 @@ struct ControlPanel: View {
                     viewModel.reset()
                 }
 
+            Toggle("Comets", isOn: $viewModel.showComets)
+
             Text("Speed")
 
             Slider(value: $viewModel.simulatedDaysPerSecond, in: 0.25...100, step: 0.25)

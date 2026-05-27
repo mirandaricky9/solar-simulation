@@ -18,6 +18,11 @@ private struct PathVertex {
     var color: SIMD4<Float>
 }
 
+private struct CometBillboardInstance {
+    var positionRadius: SIMD4<Float>
+    var color: SIMD4<Float>
+}
+
 private struct Uniforms {
     var viewProjectionMatrix: simd_float4x4
     var lightPosition: SIMD4<Float>
@@ -47,6 +52,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     private let commandQueue: MTLCommandQueue
     private let bodyPipelineState: MTLRenderPipelineState
     private let pathPipelineState: MTLRenderPipelineState
+    private let cometBillboardPipelineState: MTLRenderPipelineState
     private let bodyDepthStencilState: MTLDepthStencilState
     private let pathDepthStencilState: MTLDepthStencilState
 
@@ -76,6 +82,21 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     private var pathVertexBuffers = Array<MTLBuffer?>(repeating: nil, count: MetalRenderer.dynamicBufferCount)
     private var pathVertexCapacities = Array(repeating: 0, count: MetalRenderer.dynamicBufferCount)
     private var pathVertexCount = 0
+
+    private var cometNucleusInstanceBuffers = Array<MTLBuffer?>(repeating: nil, count: MetalRenderer.dynamicBufferCount)
+    private var cometNucleusInstanceCapacities = Array(repeating: 0, count: MetalRenderer.dynamicBufferCount)
+    private var cometNucleusInstanceCount = 0
+
+    private var cometComaInstanceBuffers = Array<MTLBuffer?>(repeating: nil, count: MetalRenderer.dynamicBufferCount)
+    private var cometComaInstanceCapacities = Array(repeating: 0, count: MetalRenderer.dynamicBufferCount)
+    private var cometComaInstanceCount = 0
+
+    private var cometTailVertexBuffers = Array<MTLBuffer?>(repeating: nil, count: MetalRenderer.dynamicBufferCount)
+    private var cometTailVertexCapacities = Array(repeating: 0, count: MetalRenderer.dynamicBufferCount)
+    private var cometTailVertexCount = 0
+
+    private var cometOrbitVertexBuffer: MTLBuffer?
+    private var cometOrbitVertexCount = 0
 
     private var staticOrbitVertexBuffer: MTLBuffer?
     private var staticOrbitVertexCapacity = 0
@@ -140,7 +161,9 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         guard let bodyVertexFunction = library.makeFunction(name: "bodyVertexShader"),
               let bodyFragmentFunction = library.makeFunction(name: "bodyFragmentShader"),
               let pathVertexFunction = library.makeFunction(name: "pathVertexShader"),
-              let pathFragmentFunction = library.makeFunction(name: "pathFragmentShader") else {
+              let pathFragmentFunction = library.makeFunction(name: "pathFragmentShader"),
+              let cometBillboardVertexFunction = library.makeFunction(name: "cometBillboardVertexShader"),
+              let cometBillboardFragmentFunction = library.makeFunction(name: "cometBillboardFragmentShader") else {
             fatalError("Could not find one or more Metal shader functions.")
         }
 
@@ -165,9 +188,24 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         pathPipelineDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
         pathPipelineDescriptor.depthAttachmentPixelFormat = mtkView.depthStencilPixelFormat
 
+        let cometBillboardPipelineDescriptor = MTLRenderPipelineDescriptor()
+        cometBillboardPipelineDescriptor.label = "Comet Billboard Pipeline"
+        cometBillboardPipelineDescriptor.vertexFunction = cometBillboardVertexFunction
+        cometBillboardPipelineDescriptor.fragmentFunction = cometBillboardFragmentFunction
+        cometBillboardPipelineDescriptor.colorAttachments[0].pixelFormat = mtkView.colorPixelFormat
+        cometBillboardPipelineDescriptor.colorAttachments[0].isBlendingEnabled = true
+        cometBillboardPipelineDescriptor.colorAttachments[0].rgbBlendOperation = .add
+        cometBillboardPipelineDescriptor.colorAttachments[0].alphaBlendOperation = .add
+        cometBillboardPipelineDescriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+        cometBillboardPipelineDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .sourceAlpha
+        cometBillboardPipelineDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+        cometBillboardPipelineDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        cometBillboardPipelineDescriptor.depthAttachmentPixelFormat = mtkView.depthStencilPixelFormat
+
         do {
             self.bodyPipelineState = try device.makeRenderPipelineState(descriptor: bodyPipelineDescriptor)
             self.pathPipelineState = try device.makeRenderPipelineState(descriptor: pathPipelineDescriptor)
+            self.cometBillboardPipelineState = try device.makeRenderPipelineState(descriptor: cometBillboardPipelineDescriptor)
         } catch {
             fatalError("Could not create Metal render pipeline states: \(error)")
         }
@@ -215,6 +253,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
                 seed: 0xA511_E901_D00D_0000 &+ UInt64(variant)
             )
         }
+        rebuildCometOrbitBuffer(definitions: viewModel.cometField.definitions)
 
         calculateProjectionMatrix(drawableSize: mtkView.drawableSize)
         updateBodies(viewModel.bodies)
@@ -281,8 +320,12 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         }
         if let viewModel {
             updateAsteroidInstances(from: viewModel.asteroidField, currentTime: viewModel.currentTime)
+            updateCometInstances(
+                from: viewModel.showComets ? viewModel.cometField.instances(at: viewModel.currentTime) : []
+            )
         } else {
             asteroidVariantInstanceCounts = Array(repeating: 0, count: Self.asteroidVariantCount)
+            updateCometInstances(from: [])
         }
 
         guard let descriptor = view.currentRenderPassDescriptor,
@@ -293,6 +336,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         }
 
         drawBodyInstances(encoder: encoder)
+        drawCometComas(encoder: encoder)
         drawPaths(encoder: encoder)
 
         encoder.endEncoding()
@@ -673,6 +717,166 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         min(max(variant, 0), Self.asteroidVariantCount - 1)
     }
 
+    private func updateCometInstances(from instances: [CometVisualInstance]) {
+        cometNucleusInstanceCount = instances.count
+        cometComaInstanceCount = instances.count
+        cometTailVertexCount = instances.reduce(0) { count, instance in
+            count + (instance.tailLengthAU > 0.001 ? 2 : 0)
+        }
+
+        if cometNucleusInstanceCount > 0 {
+            Self.ensureBodyInstanceBuffer(
+                device: device,
+                buffers: &cometNucleusInstanceBuffers,
+                capacities: &cometNucleusInstanceCapacities,
+                bufferIndex: dynamicBufferIndex,
+                requiredCount: cometNucleusInstanceCount,
+                label: "Comet Nucleus Instance Buffer"
+            )
+        }
+
+        if cometComaInstanceCount > 0 {
+            ensureCometBillboardInstanceBuffer(requiredCount: cometComaInstanceCount)
+        }
+
+        if cometTailVertexCount > 0 {
+            Self.ensurePathVertexBuffer(
+                device: device,
+                buffers: &cometTailVertexBuffers,
+                capacities: &cometTailVertexCapacities,
+                bufferIndex: dynamicBufferIndex,
+                requiredCount: cometTailVertexCount
+            )
+        }
+
+        let radiusScale = bodySizeMultiplier / pow(max(zoom, 1.0), zoomRadiusFalloff)
+
+        if let nucleusPointer = cometNucleusInstanceBuffers[dynamicBufferIndex]?.contents().bindMemory(
+            to: BodyInstance.self,
+            capacity: cometNucleusInstanceCapacities[dynamicBufferIndex]
+        ) {
+            for index in instances.indices {
+                let instance = instances[index]
+                nucleusPointer[index] = BodyInstance(
+                    positionRadius: SIMD4<Float>(
+                        instance.positionAU,
+                        instance.nucleusRadiusAU * radiusScale
+                    ),
+                    color: SIMD4<Float>(0.55, 0.53, 0.49, 1),
+                    material: SIMD4<Float>(0, 0, 0, 0)
+                )
+            }
+        }
+
+        if let comaPointer = cometComaInstanceBuffers[dynamicBufferIndex]?.contents().bindMemory(
+            to: CometBillboardInstance.self,
+            capacity: cometComaInstanceCapacities[dynamicBufferIndex]
+        ) {
+            for index in instances.indices {
+                let instance = instances[index]
+                let activity = cometActivity(for: instance)
+                comaPointer[index] = CometBillboardInstance(
+                    positionRadius: SIMD4<Float>(instance.positionAU, instance.comaRadiusAU),
+                    color: SIMD4<Float>(
+                        instance.color.x,
+                        instance.color.y,
+                        instance.color.z,
+                        0.05 + activity * 0.34
+                    )
+                )
+            }
+        }
+
+        if let tailPointer = cometTailVertexBuffers[dynamicBufferIndex]?.contents().bindMemory(
+            to: PathVertex.self,
+            capacity: cometTailVertexCapacities[dynamicBufferIndex]
+        ) {
+            var vertexIndex = 0
+
+            for instance in instances where instance.tailLengthAU > 0.001 {
+                let tailDirection = simd_normalize(instance.positionAU)
+                let activity = cometActivity(for: instance)
+                let endpoint = instance.positionAU + tailDirection * instance.tailLengthAU
+                let startColor = SIMD4<Float>(instance.color.x, instance.color.y, instance.color.z, 0.55 * activity)
+                let endColor = SIMD4<Float>(instance.color.x, instance.color.y, instance.color.z, 0.0)
+
+                tailPointer[vertexIndex] = PathVertex(position: SIMD4<Float>(instance.positionAU, 1), color: startColor)
+                vertexIndex += 1
+                tailPointer[vertexIndex] = PathVertex(position: SIMD4<Float>(endpoint, 1), color: endColor)
+                vertexIndex += 1
+            }
+        }
+    }
+
+    private func cometActivity(for instance: CometVisualInstance) -> Float {
+        guard instance.definition.tailLengthAU > 0 else { return 0 }
+
+        return min(max(instance.tailLengthAU / instance.definition.tailLengthAU, 0), 1)
+    }
+
+    private func ensureCometBillboardInstanceBuffer(requiredCount: Int) {
+        guard requiredCount > 0 else { return }
+        guard cometComaInstanceBuffers[dynamicBufferIndex] == nil ||
+                cometComaInstanceCapacities[dynamicBufferIndex] < requiredCount else {
+            return
+        }
+
+        cometComaInstanceCapacities[dynamicBufferIndex] = max(
+            requiredCount,
+            max(1, cometComaInstanceCapacities[dynamicBufferIndex] * 2)
+        )
+        cometComaInstanceBuffers[dynamicBufferIndex] = device.makeBuffer(
+            length: MemoryLayout<CometBillboardInstance>.stride * cometComaInstanceCapacities[dynamicBufferIndex],
+            options: .storageModeShared
+        )
+        cometComaInstanceBuffers[dynamicBufferIndex]?.label = "Comet Coma Instance Buffer \(dynamicBufferIndex)"
+    }
+
+    private func rebuildCometOrbitBuffer(definitions: [CometDefinition]) {
+        let segmentCount = 1_024
+        let maximumRenderedRadiusAU: Float = 80
+        var vertices: [PathVertex] = []
+
+        for definition in definitions {
+            let color = SIMD4<Float>(definition.color.x, definition.color.y, definition.color.z, 0.14)
+            var previousPosition: SIMD3<Float>?
+
+            for segment in 0...segmentCount {
+                let meanAnomaly = Double(segment) / Double(segmentCount) * Double.pi * 2
+                let position = KeplerOrbitSolver.positionAU(
+                    definition: definition,
+                    meanAnomaly: meanAnomaly
+                )
+                let isRenderable = isRenderableCometOrbitPoint(position, maximumRadiusAU: maximumRenderedRadiusAU)
+
+                if let previousPosition, isRenderable {
+                    vertices.append(PathVertex(position: SIMD4<Float>(previousPosition, 1), color: color))
+                    vertices.append(PathVertex(position: SIMD4<Float>(position, 1), color: color))
+                }
+
+                previousPosition = isRenderable ? position : nil
+            }
+        }
+
+        cometOrbitVertexCount = vertices.count
+
+        guard !vertices.isEmpty else { return }
+
+        cometOrbitVertexBuffer = device.makeBuffer(
+            bytes: vertices,
+            length: MemoryLayout<PathVertex>.stride * vertices.count,
+            options: .storageModeShared
+        )
+        cometOrbitVertexBuffer?.label = "Comet Orbit Vertex Buffer"
+    }
+
+    private func isRenderableCometOrbitPoint(_ position: SIMD3<Float>, maximumRadiusAU: Float) -> Bool {
+        position.x.isFinite &&
+            position.y.isFinite &&
+            position.z.isFinite &&
+            simd_length(position) <= maximumRadiusAU
+    }
+
     private static func ensureBodyInstanceBuffer(
         device: MTLDevice,
         buffers: inout [MTLBuffer?],
@@ -750,6 +954,17 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
                 instanceCount: asteroidVariantInstanceCounts[variant]
             )
         }
+
+        if let cometMesh = asteroidMeshVariants.first {
+            drawInstancedBodies(
+                encoder: encoder,
+                vertexBuffer: cometMesh.vertexBuffer,
+                indexBuffer: cometMesh.indexBuffer,
+                indexCount: cometMesh.indexCount,
+                instanceBuffer: cometNucleusInstanceBuffers[dynamicBufferIndex],
+                instanceCount: cometNucleusInstanceCount
+            )
+        }
     }
 
     private func drawInstancedBodies(
@@ -780,10 +995,33 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         )
     }
 
+    private func drawCometComas(encoder: MTLRenderCommandEncoder) {
+        guard let comaBuffer = cometComaInstanceBuffers[dynamicBufferIndex],
+              cometComaInstanceCount > 0 else {
+            return
+        }
+
+        var uniforms = makeUniforms()
+
+        encoder.setRenderPipelineState(cometBillboardPipelineState)
+        encoder.setDepthStencilState(pathDepthStencilState)
+        encoder.setVertexBuffer(comaBuffer, offset: 0, index: 0)
+        encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
+        encoder.drawPrimitives(
+            type: .triangle,
+            vertexStart: 0,
+            vertexCount: 6,
+            instanceCount: cometComaInstanceCount
+        )
+    }
+
     private func drawPaths(encoder: MTLRenderCommandEncoder) {
+        let shouldDrawComets = viewModel?.showComets == true
         let hasStaticOrbits = staticOrbitVertexBuffer != nil && staticOrbitVertexCount > 0
+        let hasCometOrbits = shouldDrawComets && cometOrbitVertexBuffer != nil && cometOrbitVertexCount > 0
+        let hasCometTails = shouldDrawComets && cometTailVertexBuffers[dynamicBufferIndex] != nil && cometTailVertexCount > 0
         let hasDynamicTrails = pathVertexBuffers[dynamicBufferIndex] != nil && pathVertexCount > 0
-        guard hasStaticOrbits || hasDynamicTrails else { return }
+        guard hasStaticOrbits || hasCometOrbits || hasCometTails || hasDynamicTrails else { return }
 
         var uniforms = makeUniforms()
 
@@ -794,6 +1032,18 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         if let staticOrbitVertexBuffer, staticOrbitVertexCount > 0 {
             encoder.setVertexBuffer(staticOrbitVertexBuffer, offset: 0, index: 0)
             encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: staticOrbitVertexCount)
+        }
+
+        if let cometOrbitVertexBuffer, shouldDrawComets, cometOrbitVertexCount > 0 {
+            encoder.setVertexBuffer(cometOrbitVertexBuffer, offset: 0, index: 0)
+            encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: cometOrbitVertexCount)
+        }
+
+        if let cometTailVertexBuffer = cometTailVertexBuffers[dynamicBufferIndex],
+           shouldDrawComets,
+           cometTailVertexCount > 0 {
+            encoder.setVertexBuffer(cometTailVertexBuffer, offset: 0, index: 0)
+            encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: cometTailVertexCount)
         }
 
         if let pathVertexBuffer = pathVertexBuffers[dynamicBufferIndex], pathVertexCount > 0 {

@@ -94,3 +94,59 @@ vertex PathOut pathVertexShader(
 fragment float4 pathFragmentShader(PathOut in [[stage_in]]) {
     return in.color;
 }
+
+struct CometBillboardInstance {
+    float4 positionRadius;
+    float4 color;
+};
+
+struct CometBillboardOut {
+    float4 position [[position]];
+    float2 uv;
+    float4 color;
+};
+
+vertex CometBillboardOut cometBillboardVertexShader(
+    uint vertexID [[vertex_id]],
+    uint instanceID [[instance_id]],
+    const device CometBillboardInstance *instances [[buffer(0)]],
+    constant Uniforms &uniforms [[buffer(1)]]
+) {
+    constexpr float2 corners[6] = {
+        float2(-1.0, -1.0),
+        float2( 1.0, -1.0),
+        float2(-1.0,  1.0),
+        float2( 1.0, -1.0),
+        float2( 1.0,  1.0),
+        float2(-1.0,  1.0)
+    };
+
+    CometBillboardInstance instance = instances[instanceID];
+    float3 center = instance.positionRadius.xyz;
+    float radius = instance.positionRadius.w;
+    float3 toCamera = normalize(uniforms.cameraPosition.xyz - center);
+    float3 worldUp = float3(0.0, 0.0, 1.0);
+    float3 right = cross(worldUp, toCamera);
+
+    if (length(right) < 0.001) {
+        right = float3(1.0, 0.0, 0.0);
+    } else {
+        right = normalize(right);
+    }
+
+    float3 up = normalize(cross(toCamera, right));
+    float2 corner = corners[vertexID];
+    float3 world = center + (right * corner.x + up * corner.y) * radius;
+
+    CometBillboardOut out;
+    out.position = uniforms.viewProjectionMatrix * float4(world, 1.0);
+    out.uv = corner;
+    out.color = instance.color;
+    return out;
+}
+
+fragment float4 cometBillboardFragmentShader(CometBillboardOut in [[stage_in]]) {
+    float distanceFromCenter = length(in.uv);
+    float alpha = smoothstep(1.0, 0.0, distanceFromCenter) * in.color.a;
+    return float4(in.color.rgb, alpha);
+}

@@ -12,4 +12,10 @@ The project is inspired by my interest in physics and the N-body problem.
 of the n-body problem. Purely aesthetic. There are over a million comets that we see.
 - Map Halley's comet and other comets that we see on Earth. Map apophis as well.
 - Create camera presets that move the camera that centers on the planet, based on what is selected.
-- 
+- Attach a true-time to simulate period on the system such that the date shown in the simulation is
+roughly what position the planets will be in at the time.
+- After implementing the previous bullet point, add a mechanic to be able to see when solar eclipses
+and lunar eclipses occur, along with their dates.
+- Implement time jumps between periods to get the estimated position of the celestial objects in our system.
+- Instead of simulating indefinitely, simulate for hundreds or potentially thousands of years and
+store the data somehow to avoid recalculations.

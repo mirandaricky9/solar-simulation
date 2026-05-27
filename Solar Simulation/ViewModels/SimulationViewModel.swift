@@ -12,8 +12,10 @@ final class SimulationViewModel: ObservableObject {
     @Published var directTimeStepMultiplier: Double = 1
     @Published var cameraSensitivity: Double = 1.0
     @Published var showAsteroidBelt = true
+    @Published var showComets = true
     @Published private(set) var cameraResetRequestID = 0
     @Published private(set) var asteroidField = AsteroidField(count: 0)
+    let cometField = CometVisualField()
 
     private let simulationWorker = SimulationWorker()
     private var simulationTask: Task<Void, Never>?
