@@ -150,6 +150,9 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     private let minimumPlanetVisualRadiusAU: Float = 0.012
     private let moonVisualRadiusAU: Float = 0.006
     private let asteroidVisualRadiusAU: Float = 0.0025
+    private let moonParentSeparationPaddingAU: Float = 0.006
+    private let minimumMoonOrbitDisplayRadiusAU: Float = 0.015
+    private let maximumMoonOrbitDisplayRadiusAU: Float = 0.20
     private let planetRadiusScale: Float = 0.08
     private let moonRadiusScale: Float = 0.06
     private let compactScaleMultiplier: Float = 1.35
@@ -298,7 +301,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             (boundsHeight - Float(point.y)) * drawableHeight / boundsHeight
         )
 
-        var bestHit: (object: PickableObject, distance: Float)?
+        var bestHit: (object: PickableObject, normalizedDistance: Float)?
 
         for object in pickableObjects {
             guard let projected = projectToScreen(object, drawableWidth: drawableWidth, drawableHeight: drawableHeight) else {
@@ -306,18 +309,21 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             }
 
             let distance = simd_length(projected.position - clickPosition)
-            let pickRadius = max(12, min(52, projected.radius + 8))
+            let pickRadius = max(minimumPickRadius(for: object.kind), min(maximumPickRadius(for: object.kind), projected.radius + 8))
             guard distance <= pickRadius else { continue }
 
-            if let currentBest = bestHit {
-                let isClearlyCloser = distance < currentBest.distance - 4
-                let isSimilarDistanceWithHigherPriority = abs(distance - currentBest.distance) <= 4 && object.priority > currentBest.object.priority
+            let normalizedDistance = distance / pickRadius
 
-                if isClearlyCloser || isSimilarDistanceWithHigherPriority {
-                    bestHit = (object, distance)
+            if let currentBest = bestHit {
+                let isClearlyCloser = normalizedDistance < currentBest.normalizedDistance - 0.15
+                let isSimilarHitWithHigherPriority = abs(normalizedDistance - currentBest.normalizedDistance) <= 0.15 &&
+                    object.priority > currentBest.object.priority
+
+                if isClearlyCloser || isSimilarHitWithHigherPriority {
+                    bestHit = (object, normalizedDistance)
                 }
             } else {
-                bestHit = (object, distance)
+                bestHit = (object, normalizedDistance)
             }
         }
 
@@ -599,9 +605,11 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
 
         var majorBodyIndex = 0
 
+        let bodiesByName = Dictionary(uniqueKeysWithValues: bodies.map { ($0.name, $0) })
+
         for body in bodies where !body.isAsteroid {
             let instance = BodyInstance(
-                positionRadius: SIMD4<Float>(toRenderPosition(body), visualRadius(for: body)),
+                positionRadius: SIMD4<Float>(visualRenderPosition(for: body, bodiesByName: bodiesByName), visualRadius(for: body)),
                 color: body.color,
                 material: SIMD4<Float>(body.isStar ? 1 : 0, 0, 0, 0)
             )
@@ -639,6 +647,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         }
 
         var vertexIndex = 0
+        let bodiesByName = Dictionary(uniqueKeysWithValues: bodies.map { ($0.name, $0) })
 
         for body in bodies where !body.isAsteroid {
             guard body.cumulativePosition.count > 1 else { continue }
@@ -647,9 +656,15 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             for index in 1..<body.cumulativePosition.count {
                 let previous = body.cumulativePosition[index - 1]
                 let current = body.cumulativePosition[index]
-                pathPointer[vertexIndex] = PathVertex(position: SIMD4<Float>(toRenderPosition(previous), 1), color: pathColor)
+                pathPointer[vertexIndex] = PathVertex(
+                    position: SIMD4<Float>(visualTrailRenderPosition(for: body, position: previous, bodiesByName: bodiesByName), 1),
+                    color: pathColor
+                )
                 vertexIndex += 1
-                pathPointer[vertexIndex] = PathVertex(position: SIMD4<Float>(toRenderPosition(current), 1), color: pathColor)
+                pathPointer[vertexIndex] = PathVertex(
+                    position: SIMD4<Float>(visualTrailRenderPosition(for: body, position: current, bodiesByName: bodiesByName), 1),
+                    color: pathColor
+                )
                 vertexIndex += 1
             }
         }
@@ -722,13 +737,15 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         var objects: [PickableObject] = []
         objects.reserveCapacity(bodies.count + cometInstances.count + 1)
 
+        let bodiesByName = Dictionary(uniqueKeysWithValues: bodies.map { ($0.name, $0) })
+
         for body in bodies where !body.isAsteroid {
             objects.append(
                 PickableObject(
                     id: body.id,
                     name: body.name,
                     kind: body.kind,
-                    worldPositionAU: toRenderPosition(body),
+                    worldPositionAU: visualRenderPosition(for: body, bodiesByName: bodiesByName),
                     renderRadiusAU: visualRadius(for: body),
                     priority: pickPriority(for: body.kind)
                 )
@@ -764,6 +781,75 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         pickableObjects = objects
     }
 
+    private func visualRenderPosition(for body: CelestialBody, bodiesByName: [String: CelestialBody]) -> SIMD3<Float> {
+        guard body.isMoon,
+              let parentName = body.parentName,
+              body.orbitalRadius != nil,
+              let parent = bodiesByName[parentName] else {
+            return toRenderPosition(body)
+        }
+
+        return visualRenderPosition(for: body, position: body.position, parent: parent)
+    }
+
+    private func visualTrailRenderPosition(
+        for body: CelestialBody,
+        position: SIMD3<Double>,
+        bodiesByName: [String: CelestialBody]
+    ) -> SIMD3<Float> {
+        guard body.isMoon,
+              let parentName = body.parentName,
+              let parent = bodiesByName[parentName] else {
+            return toRenderPosition(position)
+        }
+
+        return visualRenderPosition(for: body, position: position, parent: parent)
+    }
+
+    private func visualRenderPosition(
+        for moon: CelestialBody,
+        position: SIMD3<Double>,
+        parent: CelestialBody
+    ) -> SIMD3<Float> {
+        let parentRenderPosition = toRenderPosition(parent)
+        let actualMoonRenderPosition = toRenderPosition(position)
+        let offset = actualMoonRenderPosition - parentRenderPosition
+        let actualDistanceAU = simd_length(offset)
+        let direction: SIMD3<Float>
+
+        if actualDistanceAU.isFinite, actualDistanceAU > 0.000001 {
+            direction = offset / actualDistanceAU
+        } else {
+            direction = fallbackMoonDirection(for: moon)
+        }
+
+        let minimumVisibleDistance = minimumVisibleMoonDistance(parent: parent, moon: moon)
+        let visibleDistance = max(actualDistanceAU, minimumVisibleDistance)
+
+        return parentRenderPosition + direction * visibleDistance
+    }
+
+    private func fallbackMoonDirection(for moon: CelestialBody) -> SIMD3<Float> {
+        let phase = Float(moon.orbitalPhase ?? 0)
+        let direction = SIMD3<Float>(cos(phase), sin(phase), 0)
+
+        if direction.x.isFinite, direction.y.isFinite, simd_length_squared(direction) > 0 {
+            return simd_normalize(direction)
+        }
+
+        return SIMD3<Float>(1, 0, 0)
+    }
+
+    private func minimumVisibleMoonDistance(parent: CelestialBody, moon: CelestialBody) -> Float {
+        min(
+            max(
+                visualRadius(for: parent) + visualRadius(for: moon) + moonParentSeparationPaddingAU,
+                minimumMoonOrbitDisplayRadiusAU
+            ),
+            maximumMoonOrbitDisplayRadiusAU
+        )
+    }
+
     private func pickPriority(for kind: CelestialObjectKind) -> Int {
         switch kind {
         case .moon:
@@ -780,6 +866,36 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             return 1
         case .unknown:
             return 0
+        }
+    }
+
+    private func minimumPickRadius(for kind: CelestialObjectKind) -> Float {
+        switch kind {
+        case .star:
+            return 14
+        case .moon:
+            return 8
+        case .comet:
+            return 10
+        case .planet, .dwarfPlanet:
+            return 10
+        case .asteroidBelt:
+            return 18
+        case .asteroid:
+            return 8
+        case .unknown:
+            return 10
+        }
+    }
+
+    private func maximumPickRadius(for kind: CelestialObjectKind) -> Float {
+        switch kind {
+        case .asteroidBelt:
+            return 90
+        case .star:
+            return 70
+        default:
+            return 52
         }
     }
 

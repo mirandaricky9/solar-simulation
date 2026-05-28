@@ -360,7 +360,10 @@ final class SimulationViewModel: ObservableObject {
             radius: Double,
             orbitalRadiusAU: Double,
             orbitalSpeed: Double,
-            color: SIMD4<Float>
+            color: SIMD4<Float>,
+            kind: CelestialObjectKind = .planet,
+            showsTrail: Bool = true,
+            orbitalPeriodSeconds: Double? = nil
         ) -> (position: SIMD3<Double>, velocity: SIMD3<Double>) {
             let position = SIMD3<Double>(orbitalRadiusAU * au, 0, 0)
             let velocity = SIMD3<Double>(0, orbitalSpeed, 0)
@@ -373,7 +376,9 @@ final class SimulationViewModel: ObservableObject {
                     position: position,
                     velocity: velocity,
                     color: color,
-                    orbitalPeriodSeconds: SolarSystemConstants.siderealOrbitalPeriodSeconds(forPlanetNamed: name)
+                    kind: kind,
+                    showsTrail: showsTrail,
+                    orbitalPeriodSeconds: orbitalPeriodSeconds ?? SolarSystemConstants.siderealOrbitalPeriodSeconds(forPlanetNamed: name)
                 )
             )
 
@@ -388,6 +393,16 @@ final class SimulationViewModel: ObservableObject {
         let saturn = addPlanet(name: "Saturn", mass: 5.6834e26, radius: 58_232_000, orbitalRadiusAU: 9.537, orbitalSpeed: 9_680, color: SIMD4<Float>(0.90, 0.78, 0.55, 1))
         let uranus = addPlanet(name: "Uranus", mass: 8.6810e25, radius: 25_362_000, orbitalRadiusAU: 19.191, orbitalSpeed: 6_800, color: SIMD4<Float>(0.55, 0.85, 0.90, 1))
         let neptune = addPlanet(name: "Neptune", mass: 1.02413e26, radius: 24_622_000, orbitalRadiusAU: 30.07, orbitalSpeed: 5_430, color: SIMD4<Float>(0.20, 0.35, 0.90, 1))
+        let pluto = addPlanet(
+            name: "Pluto",
+            mass: 1.303e22,
+            radius: 1_188_300,
+            orbitalRadiusAU: 39.482,
+            orbitalSpeed: 4_740,
+            color: SIMD4<Float>(0.70, 0.58, 0.45, 1),
+            kind: .dwarfPlanet,
+            orbitalPeriodSeconds: SolarSystemConstants.yearsToSeconds(248.0)
+        )
 
         addMoon(&result, name: "Moon", parentName: "Earth", parentPosition: earth.position, parentVelocity: earth.velocity, mass: 7.342e22, radius: 1_737_400, distanceFromParent: 384_400_000, orbitalSpeed: 1_022, color: SIMD4<Float>(0.75, 0.75, 0.72, 1), showsTrail: true)
 
@@ -405,7 +420,11 @@ final class SimulationViewModel: ObservableObject {
         addMoon(&result, name: "Dione", parentName: "Saturn", parentPosition: saturn.position, parentVelocity: saturn.velocity, mass: 1.0955e21, radius: 561_400, distanceFromParent: 377_415_000, orbitalSpeed: 10_030, color: SIMD4<Float>(0.70, 0.70, 0.66, 1))
         addMoon(&result, name: "Rhea", parentName: "Saturn", parentPosition: saturn.position, parentVelocity: saturn.velocity, mass: 2.3065e21, radius: 763_800, distanceFromParent: 527_108_000, orbitalSpeed: 8_480, color: SIMD4<Float>(0.68, 0.67, 0.62, 1))
         addMoon(&result, name: "Titan", parentName: "Saturn", parentPosition: saturn.position, parentVelocity: saturn.velocity, mass: 1.3452e23, radius: 2_574_700, distanceFromParent: 1_221_870_000, orbitalSpeed: 5_570, color: SIMD4<Float>(0.85, 0.58, 0.30, 1))
+        addMoon(&result, name: "Hyperion", parentName: "Saturn", parentPosition: saturn.position, parentVelocity: saturn.velocity, mass: 5.62e18, radius: 135_000, distanceFromParent: 1_481_100_000, orbitalSpeed: 5_070, color: SIMD4<Float>(0.55, 0.50, 0.43, 1))
         addMoon(&result, name: "Iapetus", parentName: "Saturn", parentPosition: saturn.position, parentVelocity: saturn.velocity, mass: 1.8056e21, radius: 734_500, distanceFromParent: 3_560_820_000, orbitalSpeed: 3_260, color: SIMD4<Float>(0.60, 0.56, 0.50, 1))
+        addMoon(&result, name: "Phoebe", parentName: "Saturn", parentPosition: saturn.position, parentVelocity: saturn.velocity, mass: 8.292e18, radius: 106_500, distanceFromParent: 12_952_000_000, orbitalSpeed: 1_710, color: SIMD4<Float>(0.30, 0.28, 0.26, 1))
+        addMoon(&result, name: "Janus", parentName: "Saturn", parentPosition: saturn.position, parentVelocity: saturn.velocity, mass: 1.897e18, radius: 89_500, distanceFromParent: 151_500_000, orbitalSpeed: 15_900, color: SIMD4<Float>(0.62, 0.59, 0.54, 1))
+        addMoon(&result, name: "Epimetheus", parentName: "Saturn", parentPosition: saturn.position, parentVelocity: saturn.velocity, mass: 5.266e17, radius: 58_100, distanceFromParent: 151_400_000, orbitalSpeed: 15_900, color: SIMD4<Float>(0.60, 0.58, 0.53, 1))
 
         addMoon(&result, name: "Miranda", parentName: "Uranus", parentPosition: uranus.position, parentVelocity: uranus.velocity, mass: 6.59e19, radius: 235_800, distanceFromParent: 129_390_000, orbitalSpeed: 6_680, color: SIMD4<Float>(0.62, 0.65, 0.62, 1))
         addMoon(&result, name: "Ariel", parentName: "Uranus", parentPosition: uranus.position, parentVelocity: uranus.velocity, mass: 1.353e21, radius: 578_900, distanceFromParent: 191_020_000, orbitalSpeed: 5_510, color: SIMD4<Float>(0.68, 0.70, 0.68, 1))
@@ -413,8 +432,20 @@ final class SimulationViewModel: ObservableObject {
         addMoon(&result, name: "Titania", parentName: "Uranus", parentPosition: uranus.position, parentVelocity: uranus.velocity, mass: 3.527e21, radius: 788_900, distanceFromParent: 435_910_000, orbitalSpeed: 3_640, color: SIMD4<Float>(0.64, 0.66, 0.62, 1))
         addMoon(&result, name: "Oberon", parentName: "Uranus", parentPosition: uranus.position, parentVelocity: uranus.velocity, mass: 3.014e21, radius: 761_400, distanceFromParent: 583_520_000, orbitalSpeed: 3_150, color: SIMD4<Float>(0.55, 0.54, 0.50, 1))
 
+        addMoon(&result, name: "Naiad", parentName: "Neptune", parentPosition: neptune.position, parentVelocity: neptune.velocity, mass: 1.9e17, radius: 33_000, distanceFromParent: 48_227_000, orbitalSpeed: 13_100, color: SIMD4<Float>(0.34, 0.34, 0.33, 1))
+        addMoon(&result, name: "Thalassa", parentName: "Neptune", parentPosition: neptune.position, parentVelocity: neptune.velocity, mass: 3.5e17, radius: 41_000, distanceFromParent: 50_074_000, orbitalSpeed: 12_840, color: SIMD4<Float>(0.34, 0.34, 0.33, 1))
+        addMoon(&result, name: "Despina", parentName: "Neptune", parentPosition: neptune.position, parentVelocity: neptune.velocity, mass: 2.1e18, radius: 75_000, distanceFromParent: 52_526_000, orbitalSpeed: 12_530, color: SIMD4<Float>(0.35, 0.35, 0.34, 1))
+        addMoon(&result, name: "Galatea", parentName: "Neptune", parentPosition: neptune.position, parentVelocity: neptune.velocity, mass: 2.12e18, radius: 88_000, distanceFromParent: 61_953_000, orbitalSpeed: 11_480, color: SIMD4<Float>(0.36, 0.36, 0.35, 1))
+        addMoon(&result, name: "Larissa", parentName: "Neptune", parentPosition: neptune.position, parentVelocity: neptune.velocity, mass: 4.2e18, radius: 97_000, distanceFromParent: 73_548_000, orbitalSpeed: 10_180, color: SIMD4<Float>(0.38, 0.38, 0.36, 1))
+        addMoon(&result, name: "Proteus", parentName: "Neptune", parentPosition: neptune.position, parentVelocity: neptune.velocity, mass: 4.4e19, radius: 210_000, distanceFromParent: 117_647_000, orbitalSpeed: 7_630, color: SIMD4<Float>(0.42, 0.42, 0.40, 1))
         addMoon(&result, name: "Triton", parentName: "Neptune", parentPosition: neptune.position, parentVelocity: neptune.velocity, mass: 2.14e22, radius: 1_353_400, distanceFromParent: 354_759_000, orbitalSpeed: 4_390, color: SIMD4<Float>(0.72, 0.70, 0.66, 1))
         addMoon(&result, name: "Nereid", parentName: "Neptune", parentPosition: neptune.position, parentVelocity: neptune.velocity, mass: 3.1e19, radius: 170_000, distanceFromParent: 5_513_400_000, orbitalSpeed: 950, color: SIMD4<Float>(0.50, 0.50, 0.48, 1))
+
+        addMoon(&result, name: "Charon", parentName: "Pluto", parentPosition: pluto.position, parentVelocity: pluto.velocity, mass: 1.586e21, radius: 606_000, distanceFromParent: 19_596_000, orbitalSpeed: 210, color: SIMD4<Float>(0.55, 0.52, 0.50, 1))
+        addMoon(&result, name: "Styx", parentName: "Pluto", parentPosition: pluto.position, parentVelocity: pluto.velocity, mass: 7.5e15, radius: 8_000, distanceFromParent: 42_700_000, orbitalSpeed: 150, color: SIMD4<Float>(0.48, 0.48, 0.46, 1))
+        addMoon(&result, name: "Nix", parentName: "Pluto", parentPosition: pluto.position, parentVelocity: pluto.velocity, mass: 4.5e16, radius: 20_000, distanceFromParent: 48_700_000, orbitalSpeed: 140, color: SIMD4<Float>(0.50, 0.50, 0.48, 1))
+        addMoon(&result, name: "Kerberos", parentName: "Pluto", parentPosition: pluto.position, parentVelocity: pluto.velocity, mass: 1.65e16, radius: 12_000, distanceFromParent: 57_800_000, orbitalSpeed: 130, color: SIMD4<Float>(0.48, 0.48, 0.46, 1))
+        addMoon(&result, name: "Hydra", parentName: "Pluto", parentPosition: pluto.position, parentVelocity: pluto.velocity, mass: 4.8e16, radius: 25_000, distanceFromParent: 64_700_000, orbitalSpeed: 120, color: SIMD4<Float>(0.52, 0.52, 0.50, 1))
 
         // TODO: Render tiny irregular moons as particles or orbit markers instead of full N-body bodies.
 
