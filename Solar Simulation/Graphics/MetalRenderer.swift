@@ -88,6 +88,20 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     )
     private var asteroidVariantInstanceCounts = Array(repeating: 0, count: MetalRenderer.asteroidVariantCount)
 
+    private var minorDwarfPlanetInstanceBuffers = Array<MTLBuffer?>(repeating: nil, count: MetalRenderer.dynamicBufferCount)
+    private var minorDwarfPlanetInstanceCapacities = Array(repeating: 0, count: MetalRenderer.dynamicBufferCount)
+    private var minorDwarfPlanetInstanceCount = 0
+
+    private var minorAsteroidVariantInstanceBuffers = Array(
+        repeating: Array<MTLBuffer?>(repeating: nil, count: MetalRenderer.dynamicBufferCount),
+        count: MetalRenderer.asteroidVariantCount
+    )
+    private var minorAsteroidVariantInstanceCapacities = Array(
+        repeating: Array(repeating: 0, count: MetalRenderer.dynamicBufferCount),
+        count: MetalRenderer.asteroidVariantCount
+    )
+    private var minorAsteroidVariantInstanceCounts = Array(repeating: 0, count: MetalRenderer.asteroidVariantCount)
+
     private var pathVertexBuffers = Array<MTLBuffer?>(repeating: nil, count: MetalRenderer.dynamicBufferCount)
     private var pathVertexCapacities = Array(repeating: 0, count: MetalRenderer.dynamicBufferCount)
     private var pathVertexCount = 0
@@ -106,6 +120,12 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
 
     private var cometOrbitVertexBuffer: MTLBuffer?
     private var cometOrbitVertexCount = 0
+
+    private var dwarfPlanetOrbitVertexBuffer: MTLBuffer?
+    private var dwarfPlanetOrbitVertexCount = 0
+
+    private var notableAsteroidOrbitVertexBuffer: MTLBuffer?
+    private var notableAsteroidOrbitVertexCount = 0
 
     private var staticOrbitVertexBuffer: MTLBuffer?
     private var staticOrbitVertexCapacity = 0
@@ -269,6 +289,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             )
         }
         rebuildCometOrbitBuffer(definitions: viewModel.cometField.definitions)
+        rebuildMinorBodyOrbitBuffers(from: viewModel.minorBodyField)
 
         calculateProjectionMatrix(drawableSize: mtkView.drawableSize)
         updateBodies(viewModel.bodies)
@@ -387,12 +408,26 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             updateBodies(latestBodies)
         }
         if let viewModel {
-            let cometInstances = viewModel.showComets ? viewModel.cometField.instances(at: viewModel.currentTime) : []
+            let cometInstances = viewModel.showComets ? viewModel.cometVisualInstancesForRendering() : []
+            let dwarfPlanetInstances = viewModel.showDwarfPlanets
+                ? viewModel.dwarfPlanetVisualInstancesForRendering()
+                : []
+            let notableAsteroidInstances = viewModel.showNotableAsteroids
+                ? viewModel.notableAsteroidVisualInstancesForRendering()
+                : []
             updateAsteroidInstances(from: viewModel.asteroidField, currentTime: viewModel.currentTime)
+            updateMinorBodyInstances(dwarfPlanets: dwarfPlanetInstances, notableAsteroids: notableAsteroidInstances)
             updateCometInstances(from: cometInstances)
-            rebuildPickableObjects(from: currentBodies, viewModel: viewModel, cometInstances: cometInstances)
+            rebuildPickableObjects(
+                from: currentBodies,
+                viewModel: viewModel,
+                cometInstances: cometInstances,
+                minorBodyInstances: dwarfPlanetInstances + notableAsteroidInstances
+            )
         } else {
             asteroidVariantInstanceCounts = Array(repeating: 0, count: Self.asteroidVariantCount)
+            minorDwarfPlanetInstanceCount = 0
+            minorAsteroidVariantInstanceCounts = Array(repeating: 0, count: Self.asteroidVariantCount)
             updateCometInstances(from: [])
             pickableObjects = []
         }
@@ -587,7 +622,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             lightPosition = toRenderPosition(star.position)
         }
 
-        majorBodyInstanceCount = bodies.reduce(0) { $0 + ($1.isAsteroid ? 0 : 1) }
+        majorBodyInstanceCount = bodies.reduce(0) { $0 + (isBodyVisible($1) ? 1 : 0) }
 
         Self.ensureBodyInstanceBuffer(
             device: device,
@@ -607,7 +642,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
 
         let bodiesByName = Dictionary(uniqueKeysWithValues: bodies.map { ($0.name, $0) })
 
-        for body in bodies where !body.isAsteroid {
+        for body in bodies where isBodyVisible(body) {
             let instance = BodyInstance(
                 positionRadius: SIMD4<Float>(visualRenderPosition(for: body, bodiesByName: bodiesByName), visualRadius(for: body)),
                 color: body.color,
@@ -621,7 +656,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
 
     private func rebuildPathBuffer(from bodies: [CelestialBody]) {
         let requiredVertexCount = bodies.reduce(0) { count, body in
-            guard !body.isAsteroid else { return count }
+            guard isBodyVisible(body) else { return count }
             return count + max(0, body.cumulativePosition.count - 1) * 2
         }
 
@@ -649,7 +684,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         var vertexIndex = 0
         let bodiesByName = Dictionary(uniqueKeysWithValues: bodies.map { ($0.name, $0) })
 
-        for body in bodies where !body.isAsteroid {
+        for body in bodies where isBodyVisible(body) {
             guard body.cumulativePosition.count > 1 else { continue }
             let pathColor = SIMD4<Float>(body.color.x, body.color.y, body.color.z, 0.42)
 
@@ -684,7 +719,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         let sunPosition = toRenderPosition(sun.initialPosition)
         var vertices: [PathVertex] = []
 
-        for body in bodies where !body.isStar && !body.isAsteroid && !body.isMoon {
+        for body in bodies where !body.isStar && !body.isAsteroid && !body.isMoon && body.kind != .dwarfPlanet {
             let bodyPosition = toRenderPosition(body.initialPosition)
             let radius = simd_length(bodyPosition - sunPosition)
             guard radius > 0 else { continue }
@@ -732,14 +767,15 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     private func rebuildPickableObjects(
         from bodies: [CelestialBody],
         viewModel: SimulationViewModel,
-        cometInstances: [CometVisualInstance]
+        cometInstances: [CometVisualInstance],
+        minorBodyInstances: [MinorBodyVisualInstance]
     ) {
         var objects: [PickableObject] = []
-        objects.reserveCapacity(bodies.count + cometInstances.count + 1)
+        objects.reserveCapacity(bodies.count + cometInstances.count + minorBodyInstances.count + 1)
 
         let bodiesByName = Dictionary(uniqueKeysWithValues: bodies.map { ($0.name, $0) })
 
-        for body in bodies where !body.isAsteroid {
+        for body in bodies where isBodyVisible(body) {
             objects.append(
                 PickableObject(
                     id: body.id,
@@ -765,6 +801,19 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             )
         }
 
+        for instance in minorBodyInstances {
+            objects.append(
+                PickableObject(
+                    id: instance.definition.id,
+                    name: instance.definition.name,
+                    kind: instance.definition.kind,
+                    worldPositionAU: instance.positionAU,
+                    renderRadiusAU: instance.renderRadiusAU,
+                    priority: pickPriority(for: instance.definition.kind)
+                )
+            )
+        }
+
         if !viewModel.asteroidField.asteroids.isEmpty {
             objects.append(
                 PickableObject(
@@ -779,6 +828,16 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         }
 
         pickableObjects = objects
+    }
+
+    private func isBodyVisible(_ body: CelestialBody) -> Bool {
+        guard !body.isAsteroid else { return false }
+
+        if body.kind == .dwarfPlanet || body.parentName == "Pluto" {
+            return viewModel?.showDwarfPlanets != false
+        }
+
+        return true
     }
 
     private func visualRenderPosition(for body: CelestialBody, bodiesByName: [String: CelestialBody]) -> SIMD3<Float> {
@@ -945,6 +1004,76 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         )
 
         return simd_length(edgeScreen - centerScreen)
+    }
+
+    private func updateMinorBodyInstances(
+        dwarfPlanets: [MinorBodyVisualInstance],
+        notableAsteroids: [MinorBodyVisualInstance]
+    ) {
+        minorDwarfPlanetInstanceCount = dwarfPlanets.count
+        minorAsteroidVariantInstanceCounts = Array(repeating: 0, count: Self.asteroidVariantCount)
+
+        if minorDwarfPlanetInstanceCount > 0 {
+            Self.ensureBodyInstanceBuffer(
+                device: device,
+                buffers: &minorDwarfPlanetInstanceBuffers,
+                capacities: &minorDwarfPlanetInstanceCapacities,
+                bufferIndex: dynamicBufferIndex,
+                requiredCount: minorDwarfPlanetInstanceCount,
+                label: "Minor Dwarf Planet Instance Buffer"
+            )
+        }
+
+        for asteroid in notableAsteroids {
+            minorAsteroidVariantInstanceCounts[clampedAsteroidVariant(asteroid.meshVariant)] += 1
+        }
+
+        for variant in 0..<Self.asteroidVariantCount where minorAsteroidVariantInstanceCounts[variant] > 0 {
+            Self.ensureBodyInstanceBuffer(
+                device: device,
+                buffers: &minorAsteroidVariantInstanceBuffers[variant],
+                capacities: &minorAsteroidVariantInstanceCapacities[variant],
+                bufferIndex: dynamicBufferIndex,
+                requiredCount: minorAsteroidVariantInstanceCounts[variant],
+                label: "Notable Asteroid Variant \(variant) Instance Buffer"
+            )
+        }
+
+        let radiusScale = bodySizeMultiplier / pow(max(zoom, 1.0), zoomRadiusFalloff)
+
+        if let dwarfPointer = minorDwarfPlanetInstanceBuffers[dynamicBufferIndex]?.contents().bindMemory(
+            to: BodyInstance.self,
+            capacity: minorDwarfPlanetInstanceCapacities[dynamicBufferIndex]
+        ) {
+            for index in dwarfPlanets.indices {
+                let instance = dwarfPlanets[index]
+                dwarfPointer[index] = BodyInstance(
+                    positionRadius: SIMD4<Float>(instance.positionAU, instance.renderRadiusAU * radiusScale),
+                    color: instance.color,
+                    material: SIMD4<Float>(0, 0, 0, 0)
+                )
+            }
+        }
+
+        var pointers = Array<UnsafeMutablePointer<BodyInstance>?>(repeating: nil, count: Self.asteroidVariantCount)
+        for variant in 0..<Self.asteroidVariantCount where minorAsteroidVariantInstanceCounts[variant] > 0 {
+            pointers[variant] = minorAsteroidVariantInstanceBuffers[variant][dynamicBufferIndex]?.contents().bindMemory(
+                to: BodyInstance.self,
+                capacity: minorAsteroidVariantInstanceCapacities[variant][dynamicBufferIndex]
+            )
+        }
+
+        var writeIndices = Array(repeating: 0, count: Self.asteroidVariantCount)
+        for asteroid in notableAsteroids {
+            let variant = clampedAsteroidVariant(asteroid.meshVariant)
+            let index = writeIndices[variant]
+            writeIndices[variant] += 1
+            pointers[variant]?[index] = BodyInstance(
+                positionRadius: SIMD4<Float>(asteroid.positionAU, asteroid.renderRadiusAU * radiusScale),
+                color: asteroid.color,
+                material: SIMD4<Float>(0, 0, 0, 0)
+            )
+        }
     }
 
     private func updateAsteroidInstances(from field: AsteroidField, currentTime: Double) {
@@ -1166,7 +1295,70 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         cometOrbitVertexBuffer?.label = "Comet Orbit Vertex Buffer"
     }
 
+    private func rebuildMinorBodyOrbitBuffers(from field: MinorBodyVisualField) {
+        let dwarfVertices = minorBodyOrbitVertices(
+            definitions: field.dwarfPlanets,
+            maximumRenderedRadiusAU: 120,
+            alpha: 0.16
+        )
+        dwarfPlanetOrbitVertexCount = dwarfVertices.count
+        dwarfPlanetOrbitVertexBuffer = makePathBuffer(vertices: dwarfVertices, label: "Dwarf Planet Orbit Vertex Buffer")
+
+        let asteroidVertices = minorBodyOrbitVertices(
+            definitions: field.notableAsteroids,
+            maximumRenderedRadiusAU: 80,
+            alpha: 0.12
+        )
+        notableAsteroidOrbitVertexCount = asteroidVertices.count
+        notableAsteroidOrbitVertexBuffer = makePathBuffer(vertices: asteroidVertices, label: "Notable Asteroid Orbit Vertex Buffer")
+    }
+
+    private func minorBodyOrbitVertices(
+        definitions: [MinorBodyDefinition],
+        maximumRenderedRadiusAU: Float,
+        alpha: Float
+    ) -> [PathVertex] {
+        let segmentCount = 720
+        var vertices: [PathVertex] = []
+
+        for definition in definitions {
+            let color = SIMD4<Float>(definition.color.x, definition.color.y, definition.color.z, alpha)
+            var previousPosition: SIMD3<Float>?
+
+            for segment in 0...segmentCount {
+                let meanAnomaly = Double(segment) / Double(segmentCount) * Double.pi * 2
+                let position = KeplerOrbitSolver.positionAU(definition: definition, meanAnomaly: meanAnomaly)
+                let isRenderable = isRenderableOrbitPoint(position, maximumRadiusAU: maximumRenderedRadiusAU)
+
+                if let previousPosition, isRenderable {
+                    vertices.append(PathVertex(position: SIMD4<Float>(previousPosition, 1), color: color))
+                    vertices.append(PathVertex(position: SIMD4<Float>(position, 1), color: color))
+                }
+
+                previousPosition = isRenderable ? position : nil
+            }
+        }
+
+        return vertices
+    }
+
+    private func makePathBuffer(vertices: [PathVertex], label: String) -> MTLBuffer? {
+        guard !vertices.isEmpty else { return nil }
+
+        let buffer = device.makeBuffer(
+            bytes: vertices,
+            length: MemoryLayout<PathVertex>.stride * vertices.count,
+            options: .storageModeShared
+        )
+        buffer?.label = label
+        return buffer
+    }
+
     private func isRenderableCometOrbitPoint(_ position: SIMD3<Float>, maximumRadiusAU: Float) -> Bool {
+        isRenderableOrbitPoint(position, maximumRadiusAU: maximumRadiusAU)
+    }
+
+    private func isRenderableOrbitPoint(_ position: SIMD3<Float>, maximumRadiusAU: Float) -> Bool {
         position.x.isFinite &&
             position.y.isFinite &&
             position.z.isFinite &&
@@ -1239,6 +1431,15 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             instanceCount: majorBodyInstanceCount
         )
 
+        drawInstancedBodies(
+            encoder: encoder,
+            vertexBuffer: highDetailSphereVertexBuffer,
+            indexBuffer: highDetailSphereIndexBuffer,
+            indexCount: highDetailSphereIndexCount,
+            instanceBuffer: minorDwarfPlanetInstanceBuffers[dynamicBufferIndex],
+            instanceCount: minorDwarfPlanetInstanceCount
+        )
+
         for variant in 0..<min(asteroidMeshVariants.count, Self.asteroidVariantCount) {
             let mesh = asteroidMeshVariants[variant]
             drawInstancedBodies(
@@ -1248,6 +1449,14 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
                 indexCount: mesh.indexCount,
                 instanceBuffer: asteroidVariantInstanceBuffers[variant][dynamicBufferIndex],
                 instanceCount: asteroidVariantInstanceCounts[variant]
+            )
+            drawInstancedBodies(
+                encoder: encoder,
+                vertexBuffer: mesh.vertexBuffer,
+                indexBuffer: mesh.indexBuffer,
+                indexCount: mesh.indexCount,
+                instanceBuffer: minorAsteroidVariantInstanceBuffers[variant][dynamicBufferIndex],
+                instanceCount: minorAsteroidVariantInstanceCounts[variant]
             )
         }
 
@@ -1313,13 +1522,17 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
 
     private func drawPaths(encoder: MTLRenderCommandEncoder) {
         let shouldDrawComets = viewModel?.showComets == true
+        let shouldDrawDwarfPlanets = viewModel?.showDwarfPlanets != false
+        let shouldDrawNotableAsteroids = viewModel?.showNotableAsteroids == true
         let shouldDrawPretracedPaths = viewModel?.showPretracedOrbitPaths != false
         let shouldDrawLiveTrails = viewModel?.showLiveTrails != false
         let hasStaticOrbits = shouldDrawPretracedPaths && staticOrbitVertexBuffer != nil && staticOrbitVertexCount > 0
+        let hasDwarfPlanetOrbits = shouldDrawPretracedPaths && shouldDrawDwarfPlanets && dwarfPlanetOrbitVertexBuffer != nil && dwarfPlanetOrbitVertexCount > 0
+        let hasNotableAsteroidOrbits = shouldDrawPretracedPaths && shouldDrawNotableAsteroids && notableAsteroidOrbitVertexBuffer != nil && notableAsteroidOrbitVertexCount > 0
         let hasCometOrbits = shouldDrawPretracedPaths && shouldDrawComets && cometOrbitVertexBuffer != nil && cometOrbitVertexCount > 0
         let hasCometTails = shouldDrawComets && cometTailVertexBuffers[dynamicBufferIndex] != nil && cometTailVertexCount > 0
         let hasDynamicTrails = shouldDrawLiveTrails && pathVertexBuffers[dynamicBufferIndex] != nil && pathVertexCount > 0
-        guard hasStaticOrbits || hasCometOrbits || hasCometTails || hasDynamicTrails else { return }
+        guard hasStaticOrbits || hasDwarfPlanetOrbits || hasNotableAsteroidOrbits || hasCometOrbits || hasCometTails || hasDynamicTrails else { return }
 
         var uniforms = makeUniforms()
 
@@ -1330,6 +1543,16 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         if let staticOrbitVertexBuffer, shouldDrawPretracedPaths, staticOrbitVertexCount > 0 {
             encoder.setVertexBuffer(staticOrbitVertexBuffer, offset: 0, index: 0)
             encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: staticOrbitVertexCount)
+        }
+
+        if let dwarfPlanetOrbitVertexBuffer, shouldDrawPretracedPaths, shouldDrawDwarfPlanets, dwarfPlanetOrbitVertexCount > 0 {
+            encoder.setVertexBuffer(dwarfPlanetOrbitVertexBuffer, offset: 0, index: 0)
+            encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: dwarfPlanetOrbitVertexCount)
+        }
+
+        if let notableAsteroidOrbitVertexBuffer, shouldDrawPretracedPaths, shouldDrawNotableAsteroids, notableAsteroidOrbitVertexCount > 0 {
+            encoder.setVertexBuffer(notableAsteroidOrbitVertexBuffer, offset: 0, index: 0)
+            encoder.drawPrimitives(type: .line, vertexStart: 0, vertexCount: notableAsteroidOrbitVertexCount)
         }
 
         if let cometOrbitVertexBuffer, shouldDrawPretracedPaths, shouldDrawComets, cometOrbitVertexCount > 0 {

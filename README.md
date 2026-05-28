@@ -25,3 +25,25 @@ store the data somehow to avoid recalculations.
 - Comets do not have live trails enabled. Implement live trails for them.
 - Live trails are limited to a certain disance, instead of having it length limited, 
 change it to specific lengths for all planets
+
+
+## Ephemeris snapshots
+Initial solar-system positions are loaded from bundled NASA/JPL Horizons vector snapshots.
+The app uses 12:00:00 UTC for each preset date and displays the simulation date in UTC.
+
+To regenerate the bundled data, run:
+
+```bash
+python3 Tools/generate_ephemeris_snapshots.py
+```
+
+If the local Python certificate store cannot verify JPL's certificate chain, use:
+
+```bash
+python3 Tools/generate_ephemeris_snapshots.py --insecure
+```
+
+Snapshots are written to `Solar Simulation/Resources/EphemerisSnapshots/` and bundled with the app.
+The simulation integrates forward from the selected snapshot, so long runs can drift from
+NASA/JPL ephemerides until refreshed by jumping to another bundled snapshot. A future
+accuracy upgrade would use SPICE/SPK interpolation for arbitrary-date positions.

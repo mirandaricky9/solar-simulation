@@ -1,6 +1,6 @@
 import Foundation
 
-nonisolated enum CelestialObjectKind: String, Sendable {
+nonisolated enum CelestialObjectKind: String, Codable, Hashable, Sendable {
     case star = "Star"
     case planet = "Planet"
     case moon = "Moon"
@@ -29,6 +29,7 @@ nonisolated struct SelectedObjectInfo: Identifiable, Equatable, Sendable {
     let name: String
     let kind: CelestialObjectKind
     let parentName: String?
+    let dateText: String?
     let massKg: Double?
     let radiusMeters: Double?
     let circumferenceMeters: Double?

@@ -8,17 +8,25 @@ final class SimulationViewModel: ObservableObject {
     @Published private(set) var bodies: [CelestialBody] = []
     @Published var isRunning = false
     @Published var currentTime: Double = 0
+    @Published var selectedEphemerisPresetID: String = "current_2026"
+    @Published var currentSimulationDate: Date = EphemerisPresetCatalog.noonUTCDate(for: "current_2026") ?? Date(timeIntervalSince1970: 0)
+    @Published var currentSimulationDateText: String = "2026-05-28"
+    @Published var ephemerisLoadError: String?
     @Published var simulatedDaysPerSecond: Double = 10
     @Published var directTimeStepMultiplier: Double = 1
     @Published var cameraSensitivity: Double = 1.0
     @Published var showAsteroidBelt = true
     @Published var showComets = true
+    @Published var showDwarfPlanets = true
+    @Published var showNotableAsteroids = true
     @Published var showLiveTrails = true
     @Published var showPretracedOrbitPaths = true
     @Published var selectedObjectInfo: SelectedObjectInfo?
     @Published private(set) var cameraResetRequestID = 0
     @Published private(set) var asteroidField = AsteroidField(count: 0)
+    let ephemerisPresets = EphemerisPresetCatalog.presets
     let cometField = CometVisualField()
+    let minorBodyField = MinorBodyVisualField()
 
     private let simulationWorker = SimulationWorker()
     private var simulationTask: Task<Void, Never>?
@@ -33,6 +41,8 @@ final class SimulationViewModel: ObservableObject {
     private let publishedSnapshotInterval = 2
     private let defaultAsteroidVisualCount = 8_000
     private let asteroidBeltSelectionID = UUID(uuidString: "D78A4AF8-711E-4B56-9E33-5AFD02909346")!
+    private var currentEphemerisSnapshot: EphemerisSnapshot?
+    private var ephemerisVisualStatesByName: [String: EphemerisBodyState] = [:]
 
     init() {
         reset()
@@ -44,6 +54,36 @@ final class SimulationViewModel: ObservableObject {
     }
 
     func reset() {
+        stopForReset()
+        asteroidField = AsteroidField(count: showAsteroidBelt ? defaultAsteroidVisualCount : 0)
+
+        do {
+            let snapshot = try EphemerisSnapshotStore.shared.loadSnapshot(presetID: selectedEphemerisPresetID)
+            applyEphemerisSnapshot(snapshot, resetCamera: true)
+        } catch {
+            ephemerisLoadError = error.localizedDescription
+            applyFallbackInitialBodies(resetCamera: true)
+        }
+    }
+
+    func jumpToEphemerisPreset(_ preset: EphemerisDatePreset) {
+        jumpToEphemerisPreset(id: preset.id)
+    }
+
+    func jumpToEphemerisPreset(id: String) {
+        selectedEphemerisPresetID = id
+        stopForReset()
+        asteroidField = AsteroidField(count: showAsteroidBelt ? defaultAsteroidVisualCount : 0)
+
+        do {
+            let snapshot = try EphemerisSnapshotStore.shared.loadSnapshot(presetID: id)
+            applyEphemerisSnapshot(snapshot, resetCamera: false)
+        } catch {
+            ephemerisLoadError = error.localizedDescription
+        }
+    }
+
+    private func stopForReset() {
         simulationTask?.cancel()
         simulationTask = nil
         workerSyncTask?.cancel()
@@ -52,17 +92,142 @@ final class SimulationViewModel: ObservableObject {
         accumulatedTime = 0
         accumulatedSimulationDebt = 0
         lastFrameTime = nil
+    }
 
-        asteroidField = AsteroidField(count: showAsteroidBelt ? defaultAsteroidVisualCount : 0)
-
+    private func applyFallbackInitialBodies(resetCamera: Bool) {
+        currentEphemerisSnapshot = nil
+        ephemerisVisualStatesByName.removeAll()
+        currentSimulationDate = EphemerisPresetCatalog.noonUTCDate(for: selectedEphemerisPresetID) ?? currentSimulationDate
+        updateCurrentSimulationDateText()
         let newBodies = Self.makeInitialBodies()
+        setBodies(newBodies, resetCamera: resetCamera)
+    }
+
+    private func applyEphemerisSnapshot(_ snapshot: EphemerisSnapshot, resetCamera: Bool) {
+        let stateByName = Dictionary(snapshot.states.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
+        var newBodies = Self.makeInitialBodies().map { body in
+            if body.name == "Sun" {
+                return replacingState(
+                    of: body,
+                    position: SIMD3<Double>(0, 0, 0),
+                    velocity: SIMD3<Double>(0, 0, 0)
+                )
+            }
+
+            guard let state = stateByName[body.name] else {
+                return body
+            }
+
+            return replacingState(
+                of: body,
+                position: state.positionVector,
+                velocity: state.velocityVector
+            )
+        }
+
+        let bodyByName = Dictionary(newBodies.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
+        for index in newBodies.indices {
+            guard let parentName = newBodies[index].parentName,
+                  let parent = bodyByName[parentName] else {
+                continue
+            }
+
+            let relativePosition = newBodies[index].position - parent.position
+            if simd_length_squared(relativePosition) > 0 {
+                newBodies[index].orbitalPhase = atan2(relativePosition.y, relativePosition.x)
+            }
+        }
+
+        for index in newBodies.indices {
+            newBodies[index].cumulativePosition.removeAll(keepingCapacity: true)
+            if newBodies[index].showsTrail {
+                newBodies[index].cumulativePosition.append(newBodies[index].position)
+            }
+        }
+
+        currentEphemerisSnapshot = snapshot
+        ephemerisVisualStatesByName = stateByName
+        selectedEphemerisPresetID = snapshot.presetID
+        currentSimulationDate = DateFormatters.ephemerisTimestampUTC.date(from: snapshot.internalTimestampUTC)
+            ?? EphemerisPresetCatalog.noonUTCDate(isoDate: snapshot.isoDate)
+            ?? currentSimulationDate
+        updateCurrentSimulationDateText()
+        ephemerisLoadError = validationMessage(for: snapshot, stateByName: stateByName)
+
+        print("Loaded ephemeris snapshot \(snapshot.presetID) with \(snapshot.states.count) states.")
+        setBodies(newBodies, resetCamera: resetCamera)
+    }
+
+    private func replacingState(
+        of body: CelestialBody,
+        position: SIMD3<Double>,
+        velocity: SIMD3<Double>
+    ) -> CelestialBody {
+        CelestialBody(
+            name: body.name,
+            mass: body.mass,
+            visualRadius: body.visualRadius,
+            position: position,
+            velocity: velocity,
+            color: body.color,
+            kind: body.kind,
+            isStar: body.isStar,
+            isMoon: body.isMoon,
+            isAsteroid: body.isAsteroid,
+            showsTrail: body.showsTrail,
+            parentName: body.parentName,
+            orbitalRadius: body.orbitalRadius,
+            orbitalSpeed: body.orbitalSpeed,
+            orbitalPeriodSeconds: body.orbitalPeriodSeconds,
+            orbitalPhase: body.orbitalPhase
+        )
+    }
+
+    private func setBodies(_ newBodies: [CelestialBody], resetCamera: Bool) {
         bodies = newBodies
         updateSelectedObjectInfo()
-        cameraResetRequestID += 1
+
+        if resetCamera {
+            cameraResetRequestID += 1
+        }
 
         workerSyncTask = Task { [simulationWorker] in
             await simulationWorker.setBodies(newBodies)
         }
+    }
+
+    private func validationMessage(
+        for snapshot: EphemerisSnapshot,
+        stateByName: [String: EphemerisBodyState]
+    ) -> String? {
+        let physicsBodyNames = Self.makeInitialBodies().map(\.name)
+        let missingPhysicsNames = physicsBodyNames.filter { $0 != "Sun" && stateByName[$0] == nil }
+        if !missingPhysicsNames.isEmpty {
+            print("Ephemeris snapshot \(snapshot.presetID) is missing non-Sun physics states: \(missingPhysicsNames.joined(separator: ", ")).")
+        }
+
+        let criticalNames = ["Sun", "Mercury", "Venus", "Earth", "Moon", "Mars", "Jupiter", "Saturn", "Uranus", "Neptune"]
+        let missingCriticalNames = criticalNames.filter { $0 != "Sun" && stateByName[$0] == nil }
+
+        guard !missingCriticalNames.isEmpty else {
+            return nil
+        }
+
+        let message = "Ephemeris snapshot \(snapshot.presetID) is missing critical states: \(missingCriticalNames.joined(separator: ", "))."
+        print(message)
+        return message
+    }
+
+    private func updateCurrentSimulationDateText() {
+        currentSimulationDateText = DateFormatters.simulationDateUTC.string(from: currentSimulationDate)
+    }
+
+    private func advanceSimulationClock(by seconds: Double) {
+        guard seconds.isFinite, seconds > 0 else { return }
+        accumulatedTime += seconds
+        currentTime = accumulatedTime
+        currentSimulationDate = currentSimulationDate.addingTimeInterval(seconds)
+        updateCurrentSimulationDateText()
     }
 
     func toggleSimulation() {
@@ -81,8 +246,7 @@ final class SimulationViewModel: ObservableObject {
             let steppedBodies = await simulationWorker.step(dt: dt)
 
             await MainActor.run {
-                self.accumulatedTime += dt
-                self.currentTime = self.accumulatedTime
+                self.advanceSimulationClock(by: dt)
                 self.bodies = steppedBodies
                 self.updateSelectedObjectInfo()
             }
@@ -110,6 +274,33 @@ final class SimulationViewModel: ObservableObject {
         selectedObjectInfo = nil
     }
 
+    func cometVisualInstancesForRendering() -> [CometVisualInstance] {
+        cometField.instances(at: currentTime).map { instance in
+            guard let state = ephemerisState(named: instance.definition.name, aliases: [instance.definition.shortName]) else {
+                return instance
+            }
+
+            let positionAU = ephemerisPositionAU(from: state, elapsedTime: currentTime)
+            let distanceFromSun = max(simd_length(positionAU), 0.001)
+            let sunDirection = simd_normalize(-positionAU)
+            let activity = min(max((3.0 - distanceFromSun) / 3.0, 0.0), 1.0)
+            var updatedInstance = instance
+            updatedInstance.positionAU = positionAU
+            updatedInstance.sunDirection = sunDirection
+            updatedInstance.tailLengthAU = instance.definition.tailLengthAU * activity
+            updatedInstance.comaRadiusAU = instance.definition.comaRadiusAU * (0.25 + 0.75 * activity)
+            return updatedInstance
+        }
+    }
+
+    func dwarfPlanetVisualInstancesForRendering() -> [MinorBodyVisualInstance] {
+        minorBodyField.dwarfPlanetInstances(at: currentTime, excluding: ["Pluto"]).map(ephemerisAdjustedMinorBodyInstance)
+    }
+
+    func notableAsteroidVisualInstancesForRendering() -> [MinorBodyVisualInstance] {
+        minorBodyField.notableAsteroidInstances(at: currentTime).map(ephemerisAdjustedMinorBodyInstance)
+    }
+
     func updateSelectedObjectInfo() {
         guard let selectedObjectName else { return }
 
@@ -120,6 +311,11 @@ final class SimulationViewModel: ObservableObject {
 
         if let comet = cometField.definitions.first(where: { $0.name == selectedObjectName || $0.shortName == selectedObjectName }) {
             selectedObjectInfo = makeSelectedInfo(for: comet, simulationTime: currentTime)
+            return
+        }
+
+        if let minorBody = minorBodyField.definition(named: selectedObjectName) {
+            selectedObjectInfo = makeSelectedInfo(for: minorBody, simulationTime: currentTime)
             return
         }
 
@@ -174,8 +370,7 @@ final class SimulationViewModel: ObservableObject {
                             dt: physicsStepDt
                         )
                         guard !Task.isCancelled else { return }
-                        self.accumulatedTime += simulatedTimeAdvanced
-                        self.currentTime = self.accumulatedTime
+                        self.advanceSimulationClock(by: simulatedTimeAdvanced)
                         self.bodies = steppedBodies
                         self.updateSelectedObjectInfo()
                     } else {
@@ -184,7 +379,7 @@ final class SimulationViewModel: ObservableObject {
                             dt: physicsStepDt
                         )
                         guard !Task.isCancelled else { return }
-                        self.accumulatedTime += simulatedTimeAdvanced
+                        self.advanceSimulationClock(by: simulatedTimeAdvanced)
                     }
 
                     stepIndex += 1
@@ -223,6 +418,7 @@ final class SimulationViewModel: ObservableObject {
             name: body.name,
             kind: body.kind,
             parentName: body.parentName,
+            dateText: currentSimulationDateText,
             massKg: body.mass,
             radiusMeters: body.visualRadius,
             circumferenceMeters: circumference,
@@ -236,13 +432,17 @@ final class SimulationViewModel: ObservableObject {
     }
 
     private func makeSelectedInfo(for comet: CometDefinition, simulationTime: Double) -> SelectedObjectInfo {
-        let positionAU = KeplerOrbitSolver.positionAU(definition: comet, simulationTime: simulationTime)
-        let futurePositionAU = KeplerOrbitSolver.positionAU(definition: comet, simulationTime: simulationTime + 3_600)
+        let state = ephemerisState(named: comet.name, aliases: [comet.shortName])
+        let positionAU = state.map { ephemerisPositionAU(from: $0, elapsedTime: simulationTime) }
+            ?? KeplerOrbitSolver.positionAU(definition: comet, simulationTime: simulationTime)
+        let futurePositionAU = state.map { ephemerisPositionAU(from: $0, elapsedTime: simulationTime + 3_600) }
+            ?? KeplerOrbitSolver.positionAU(definition: comet, simulationTime: simulationTime + 3_600)
         let distanceToSun = Double(simd_length(positionAU)) * SolarSystemConstants.astronomicalUnit
         let futureDistanceToSun = Double(simd_length(futurePositionAU)) * SolarSystemConstants.astronomicalUnit
         let radius = Double(comet.nucleusRadiusAU) * SolarSystemConstants.astronomicalUnit
         let orbitalPeriod = SolarSystemConstants.yearsToSeconds(comet.periodYears)
-        let speed = cometSpeed(distanceMeters: distanceToSun, semiMajorAxisAU: comet.semiMajorAxisAU)
+        let speed = state.map { simd_length($0.velocityVector) }
+            ?? cometSpeed(distanceMeters: distanceToSun, semiMajorAxisAU: comet.semiMajorAxisAU)
         let apsisPhase: ApsisPhase
 
         if abs(futureDistanceToSun - distanceToSun) < 1_000 {
@@ -256,6 +456,7 @@ final class SimulationViewModel: ObservableObject {
             name: comet.name,
             kind: .comet,
             parentName: "Sun",
+            dateText: currentSimulationDateText,
             massKg: nil,
             radiusMeters: radius,
             circumferenceMeters: 2 * Double.pi * radius,
@@ -264,7 +465,46 @@ final class SimulationViewModel: ObservableObject {
             orbitalPeriodSeconds: orbitalPeriod,
             speedMetersPerSecond: speed,
             apsisPhase: apsisPhase,
-            notes: "Analytic visual comet; not N-body simulated."
+            notes: [comet.notes, "Analytic visual comet; not N-body simulated."].compactMap { $0 }.joined(separator: " ")
+        )
+    }
+
+    private func makeSelectedInfo(for minorBody: MinorBodyDefinition, simulationTime: Double) -> SelectedObjectInfo {
+        let state = ephemerisState(
+            named: minorBody.name,
+            aliases: minorBodySnapshotAliases(for: minorBody.name)
+        )
+        let positionAU = state.map { ephemerisPositionAU(from: $0, elapsedTime: simulationTime) }
+            ?? KeplerOrbitSolver.positionAU(definition: minorBody, simulationTime: simulationTime)
+        let futurePositionAU = state.map { ephemerisPositionAU(from: $0, elapsedTime: simulationTime + 3_600) }
+            ?? KeplerOrbitSolver.positionAU(definition: minorBody, simulationTime: simulationTime + 3_600)
+        let distanceToSun = Double(simd_length(positionAU)) * SolarSystemConstants.astronomicalUnit
+        let futureDistanceToSun = Double(simd_length(futurePositionAU)) * SolarSystemConstants.astronomicalUnit
+        let speed = state.map { simd_length($0.velocityVector) }
+            ?? cometSpeed(distanceMeters: distanceToSun, semiMajorAxisAU: minorBody.semiMajorAxisAU)
+        let apsisPhase: ApsisPhase
+
+        if abs(futureDistanceToSun - distanceToSun) < 1_000 {
+            apsisPhase = .unknown
+        } else {
+            apsisPhase = futureDistanceToSun > distanceToSun ? .movingTowardAphelion : .movingTowardPerihelion
+        }
+
+        return SelectedObjectInfo(
+            id: minorBody.id,
+            name: minorBody.name,
+            kind: minorBody.kind,
+            parentName: "Sun",
+            dateText: currentSimulationDateText,
+            massKg: minorBody.massKg,
+            radiusMeters: minorBody.meanRadiusMeters,
+            circumferenceMeters: minorBody.circumferenceMeters,
+            distanceToSunMeters: distanceToSun,
+            distanceToParentMeters: nil,
+            orbitalPeriodSeconds: minorBody.orbitalPeriodSeconds,
+            speedMetersPerSecond: speed,
+            apsisPhase: apsisPhase,
+            notes: [minorBody.notes, "Analytic visual object; not N-body simulated."].compactMap { $0 }.joined(separator: " ")
         )
     }
 
@@ -274,6 +514,7 @@ final class SimulationViewModel: ObservableObject {
             name: "Asteroid Belt",
             kind: .asteroidBelt,
             parentName: "Sun",
+            dateText: currentSimulationDateText,
             massKg: nil,
             radiusMeters: nil,
             circumferenceMeters: nil,
@@ -284,6 +525,64 @@ final class SimulationViewModel: ObservableObject {
             apsisPhase: .notApplicable,
             notes: "Aesthetic asteroid field; not N-body simulated. Individual asteroids use analytic visual orbits."
         )
+    }
+
+    private func ephemerisAdjustedMinorBodyInstance(_ instance: MinorBodyVisualInstance) -> MinorBodyVisualInstance {
+        guard let state = ephemerisState(
+            named: instance.definition.name,
+            aliases: minorBodySnapshotAliases(for: instance.definition.name)
+        ) else {
+            return instance
+        }
+
+        return MinorBodyVisualInstance(
+            definition: instance.definition,
+            positionAU: ephemerisPositionAU(from: state, elapsedTime: currentTime),
+            renderRadiusAU: instance.renderRadiusAU,
+            color: instance.color,
+            meshVariant: instance.meshVariant
+        )
+    }
+
+    private func ephemerisState(named name: String, aliases: [String] = []) -> EphemerisBodyState? {
+        if let state = ephemerisVisualStatesByName[name] {
+            return state
+        }
+
+        for alias in aliases {
+            if let state = ephemerisVisualStatesByName[alias] {
+                return state
+            }
+        }
+
+        return nil
+    }
+
+    private func ephemerisPositionAU(from state: EphemerisBodyState, elapsedTime: Double) -> SIMD3<Float> {
+        let position = state.positionVector + state.velocityVector * elapsedTime
+        let au = SolarSystemConstants.astronomicalUnit
+        return SIMD3<Float>(
+            Float(position.x / au),
+            Float(position.y / au),
+            Float(position.z / au)
+        )
+    }
+
+    private func distanceMeters(from state: EphemerisBodyState, elapsedTime: Double) -> Double {
+        simd_length(state.positionVector + state.velocityVector * elapsedTime)
+    }
+
+    private func minorBodySnapshotAliases(for name: String) -> [String] {
+        switch name {
+        case "4 Vesta":
+            return ["Vesta"]
+        case "2 Pallas":
+            return ["Pallas"]
+        case "10 Hygiea":
+            return ["Hygiea"]
+        default:
+            return []
+        }
     }
 
     private func estimateOrbitalPeriod(distanceMeters: Double?, speedMetersPerSecond: Double) -> Double? {
@@ -401,7 +700,7 @@ final class SimulationViewModel: ObservableObject {
             orbitalSpeed: 4_740,
             color: SIMD4<Float>(0.70, 0.58, 0.45, 1),
             kind: .dwarfPlanet,
-            orbitalPeriodSeconds: SolarSystemConstants.yearsToSeconds(248.0)
+            orbitalPeriodSeconds: SolarSystemConstants.yearsToSeconds(247.94)
         )
 
         addMoon(&result, name: "Moon", parentName: "Earth", parentPosition: earth.position, parentVelocity: earth.velocity, mass: 7.342e22, radius: 1_737_400, distanceFromParent: 384_400_000, orbitalSpeed: 1_022, color: SIMD4<Float>(0.75, 0.75, 0.72, 1), showsTrail: true)

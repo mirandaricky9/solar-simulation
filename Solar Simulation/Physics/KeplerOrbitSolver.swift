@@ -8,8 +8,42 @@ nonisolated enum KeplerOrbitSolver {
     }
 
     static func positionAU(definition: CometDefinition, meanAnomaly: Double) -> SIMD3<Float> {
-        let eccentricity = min(max(definition.eccentricity, 0), 0.999999)
-        let semiMajorAxis = definition.semiMajorAxisAU
+        positionAU(
+            semiMajorAxisAU: definition.semiMajorAxisAU,
+            eccentricity: definition.eccentricity,
+            inclinationDegrees: definition.inclinationDegrees,
+            longitudeOfAscendingNodeDegrees: definition.longitudeOfAscendingNodeDegrees,
+            argumentOfPerihelionDegrees: definition.argumentOfPerihelionDegrees,
+            meanAnomaly: meanAnomaly
+        )
+    }
+
+    static func positionAU(definition: MinorBodyDefinition, simulationTime: Double) -> SIMD3<Float> {
+        let meanMotion = 2.0 * Double.pi / definition.orbitalPeriodSeconds
+        let meanAnomaly = meanMotion * simulationTime + definition.phaseOffsetRadians
+        return positionAU(definition: definition, meanAnomaly: meanAnomaly)
+    }
+
+    static func positionAU(definition: MinorBodyDefinition, meanAnomaly: Double) -> SIMD3<Float> {
+        positionAU(
+            semiMajorAxisAU: definition.semiMajorAxisAU,
+            eccentricity: definition.eccentricity,
+            inclinationDegrees: definition.inclinationDegrees,
+            longitudeOfAscendingNodeDegrees: definition.longitudeOfAscendingNodeDegrees,
+            argumentOfPerihelionDegrees: definition.argumentOfPerihelionDegrees,
+            meanAnomaly: meanAnomaly
+        )
+    }
+
+    private static func positionAU(
+        semiMajorAxisAU: Double,
+        eccentricity: Double,
+        inclinationDegrees: Double,
+        longitudeOfAscendingNodeDegrees: Double,
+        argumentOfPerihelionDegrees: Double,
+        meanAnomaly: Double
+    ) -> SIMD3<Float> {
+        let eccentricity = min(max(eccentricity, 0), 0.999999)
         let normalizedMeanAnomaly = normalizeAngle(meanAnomaly)
         let eccentricAnomaly = solveEccentricAnomaly(meanAnomaly: normalizedMeanAnomaly, eccentricity: eccentricity)
         let halfE = eccentricAnomaly * 0.5
@@ -17,14 +51,14 @@ nonisolated enum KeplerOrbitSolver {
             sqrt(1 + eccentricity) * sin(halfE),
             sqrt(max(1 - eccentricity, 0.000001)) * cos(halfE)
         )
-        let radius = semiMajorAxis * (1 - eccentricity * cos(eccentricAnomaly))
+        let radius = semiMajorAxisAU * (1 - eccentricity * cos(eccentricAnomaly))
 
         return rotateOrbitalPlanePosition(
             radius: radius,
             trueAnomaly: trueAnomaly,
-            inclinationDegrees: definition.inclinationDegrees,
-            longitudeOfAscendingNodeDegrees: definition.longitudeOfAscendingNodeDegrees,
-            argumentOfPerihelionDegrees: definition.argumentOfPerihelionDegrees
+            inclinationDegrees: inclinationDegrees,
+            longitudeOfAscendingNodeDegrees: longitudeOfAscendingNodeDegrees,
+            argumentOfPerihelionDegrees: argumentOfPerihelionDegrees
         )
     }
 

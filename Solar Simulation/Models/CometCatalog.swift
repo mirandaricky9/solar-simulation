@@ -167,6 +167,59 @@ nonisolated enum CometCatalog {
             comaRadiusAU: 0.20,
             tailLengthAU: 3.0,
             color: SIMD4<Float>(0.92, 0.96, 1.0, 1)
-        )
+        ),
+        comet(name: "19P/Borrelly", shortName: "Borrelly", periodYears: 6.85, perihelionAU: 1.36, eccentricity: 0.62, inclinationDegrees: 30.3),
+        comet(name: "21P/Giacobini-Zinner", shortName: "Giacobini-Zinner", periodYears: 6.52, perihelionAU: 1.01, eccentricity: 0.71, inclinationDegrees: 32.0, notes: "Parent of the Draconid meteor shower."),
+        comet(name: "26P/Grigg-Skjellerup", shortName: "Grigg-Skjellerup", periodYears: 5.31, perihelionAU: 1.12, eccentricity: 0.64, inclinationDegrees: 22.4),
+        comet(name: "46P/Wirtanen", shortName: "Wirtanen", periodYears: 5.44, perihelionAU: 1.06, eccentricity: 0.66, inclinationDegrees: 11.7),
+        comet(name: "55P/Tempel-Tuttle", shortName: "Tempel-Tuttle", periodYears: 33.2, perihelionAU: 0.98, eccentricity: 0.91, inclinationDegrees: 162.5, notes: "Parent of the Leonid meteor shower."),
+        comet(name: "73P/Schwassmann-Wachmann 3", shortName: "73P", periodYears: 5.36, perihelionAU: 0.97, eccentricity: 0.69, inclinationDegrees: 11.4),
+        comet(name: "96P/Machholz", shortName: "Machholz", periodYears: 5.29, perihelionAU: 0.12, eccentricity: 0.96, inclinationDegrees: 58.3),
+        comet(name: "153P/Ikeya-Zhang", shortName: "Ikeya-Zhang", periodYears: 366, perihelionAU: 0.51, eccentricity: 0.99, inclinationDegrees: 28.1),
+        comet(name: "C/2011 L4 PANSTARRS", shortName: "PANSTARRS", periodYears: 106_000, perihelionAU: 0.30, eccentricity: 0.999, inclinationDegrees: 84.2),
+        comet(name: "C/2012 S1 ISON", shortName: "ISON", periodYears: 400_000, perihelionAU: 0.012, eccentricity: 0.9999, inclinationDegrees: 62.4, notes: "Sungrazing comet that disintegrated near perihelion."),
+        comet(name: "C/2021 A1 Leonard", shortName: "Leonard", periodYears: 80_000, perihelionAU: 0.62, eccentricity: 0.999, inclinationDegrees: 132.7),
+        comet(name: "C/2023 P1 Nishimura", shortName: "Nishimura", periodYears: 430, perihelionAU: 0.23, eccentricity: 0.996, inclinationDegrees: 132.5)
     ]
+
+    private static func comet(
+        name: String,
+        shortName: String,
+        periodYears: Double,
+        perihelionAU: Double,
+        eccentricity: Double,
+        inclinationDegrees: Double,
+        notes: String? = nil
+    ) -> CometDefinition {
+        CometDefinition(
+            name: name,
+            shortName: shortName,
+            periodYears: periodYears,
+            perihelionAU: perihelionAU,
+            eccentricity: eccentricity,
+            inclinationDegrees: inclinationDegrees,
+            longitudeOfAscendingNodeDegrees: deterministicDegrees(name: name, salt: 19),
+            argumentOfPerihelionDegrees: deterministicDegrees(name: name, salt: 71),
+            phaseOffsetRadians: deterministicRadians(name: name, salt: 127),
+            nucleusRadiusAU: periodYears > 100 ? 0.016 : 0.010,
+            comaRadiusAU: periodYears > 100 ? 0.16 : 0.075,
+            tailLengthAU: perihelionAU < 0.3 ? 2.4 : 0.75,
+            color: SIMD4<Float>(0.84, 0.93, 1.0, 1),
+            notes: notes
+        )
+    }
+
+    private static func deterministicDegrees(name: String, salt: Int) -> Double {
+        deterministicUnit(name: name, salt: salt) * 360.0
+    }
+
+    private static func deterministicRadians(name: String, salt: Int) -> Double {
+        deterministicUnit(name: name, salt: salt) * Double.pi * 2.0
+    }
+
+    private static func deterministicUnit(name: String, salt: Int) -> Double {
+        let scalarSum = name.unicodeScalars.reduce(salt) { $0 &+ Int($1.value) }
+        let value = abs(sin(Double(scalarSum) * 12.9898) * 43_758.5453)
+        return value - floor(value)
+    }
 }

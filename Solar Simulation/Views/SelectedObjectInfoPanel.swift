@@ -25,6 +25,10 @@ struct SelectedObjectInfoPanel: View {
 
             Divider()
 
+            if let dateText = info.dateText {
+                infoRow("Date", dateText)
+            }
+
             if let parentName = info.parentName {
                 infoRow("Parent", parentName)
             }

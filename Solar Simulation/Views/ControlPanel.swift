@@ -17,17 +17,6 @@ struct ControlPanel: View {
                 viewModel.reset()
             }
 
-            Toggle("Asteroid Belt", isOn: $viewModel.showAsteroidBelt)
-                .onChange(of: viewModel.showAsteroidBelt) { _ in
-                    viewModel.reset()
-                }
-
-            Toggle("Comets", isOn: $viewModel.showComets)
-
-            Toggle("Live Trails", isOn: $viewModel.showLiveTrails)
-
-            Toggle("Orbit Paths", isOn: $viewModel.showPretracedOrbitPaths)
-
             Button("Clear Trails") {
                 viewModel.clearTrails()
             }
@@ -64,7 +53,7 @@ struct ControlPanel: View {
             Text("Bodies: \(viewModel.bodies.count)")
                 .monospacedDigit()
 
-            Text("Days: \(Int(viewModel.currentTime / 86_400))")
+            Text("Date: \(viewModel.currentSimulationDateText)")
                 .monospacedDigit()
         }
         .padding()
