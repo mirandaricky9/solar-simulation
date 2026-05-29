@@ -5,12 +5,26 @@ import simd
 private struct SphereVertex {
     var position: SIMD3<Float>
     var normal: SIMD3<Float>
+    var uv: SIMD2<Float>
 }
 
 private struct BodyInstance {
     var positionRadius: SIMD4<Float>
     var color: SIMD4<Float>
     var material: SIMD4<Float>
+    var spinTilt: SIMD4<Float>
+
+    init(
+        positionRadius: SIMD4<Float>,
+        color: SIMD4<Float>,
+        material: SIMD4<Float>,
+        spinTilt: SIMD4<Float> = SIMD4<Float>(0, 0, 0, 0)
+    ) {
+        self.positionRadius = positionRadius
+        self.color = color
+        self.material = material
+        self.spinTilt = spinTilt
+    }
 }
 
 private struct PathVertex {
@@ -64,6 +78,8 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     private let cometBillboardPipelineState: MTLRenderPipelineState
     private let bodyDepthStencilState: MTLDepthStencilState
     private let pathDepthStencilState: MTLDepthStencilState
+    private let textureLoader: MTKTextureLoader
+    private let textureSamplerState: MTLSamplerState
 
     private weak var mtkView: MTKView?
     private weak var viewModel: SimulationViewModel?
@@ -76,6 +92,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
 
     private var majorBodyInstanceBuffers = Array<MTLBuffer?>(repeating: nil, count: MetalRenderer.dynamicBufferCount)
     private var majorBodyInstanceCapacities = Array(repeating: 0, count: MetalRenderer.dynamicBufferCount)
+    private var majorBodyInstanceTextureNames: [String] = []
     private var majorBodyInstanceCount = 0
 
     private var asteroidVariantInstanceBuffers = Array(
@@ -90,6 +107,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
 
     private var minorDwarfPlanetInstanceBuffers = Array<MTLBuffer?>(repeating: nil, count: MetalRenderer.dynamicBufferCount)
     private var minorDwarfPlanetInstanceCapacities = Array(repeating: 0, count: MetalRenderer.dynamicBufferCount)
+    private var minorDwarfPlanetInstanceTextureNames: [String] = []
     private var minorDwarfPlanetInstanceCount = 0
 
     private var minorAsteroidVariantInstanceBuffers = Array(
@@ -130,7 +148,8 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     private var staticOrbitVertexBuffer: MTLBuffer?
     private var staticOrbitVertexCapacity = 0
     private var staticOrbitVertexCount = 0
-    private var staticOrbitSignature: [UUID] = []
+    private var staticOrbitSignature = ""
+    private var planetOrbitPaths: [OrbitPathDefinition] = []
 
     private var dynamicBufferIndex = 0
 
@@ -138,8 +157,13 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     private var pickableObjects: [PickableObject] = []
     private var worldViewProjectionMatrix = matrix_identity_float4x4
     private var lightPosition = SIMD3<Float>(0, 0, 0)
+    private var texturesByBodyName: [String: MTLTexture] = [:]
+    private var fallbackWhiteTexture: MTLTexture?
 
     private var cameraPosition = MetalRenderer.defaultCameraPosition
+    private var cameraFocusPoint = SIMD3<Float>(0, 0, 0)
+    private var cameraFocusDistance = simd_length(MetalRenderer.defaultCameraPosition)
+    private var cameraLockTargetName: String?
     private var yaw = MetalRenderer.defaultYaw
     private var pitch = MetalRenderer.defaultPitch
     private var roll: Float = 0
@@ -261,16 +285,32 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             fatalError("Could not create path depth stencil state.")
         }
 
+        let textureSamplerDescriptor = MTLSamplerDescriptor()
+        textureSamplerDescriptor.minFilter = .linear
+        textureSamplerDescriptor.magFilter = .linear
+        textureSamplerDescriptor.mipFilter = .linear
+        textureSamplerDescriptor.sAddressMode = .repeat
+        textureSamplerDescriptor.tAddressMode = .clampToEdge
+
+        guard let textureSamplerState = device.makeSamplerState(descriptor: textureSamplerDescriptor) else {
+            fatalError("Could not create texture sampler state.")
+        }
+
         self.device = device
         self.commandQueue = commandQueue
         self.bodyDepthStencilState = bodyDepthStencilState
         self.pathDepthStencilState = pathDepthStencilState
+        self.textureLoader = MTKTextureLoader(device: device)
+        self.textureSamplerState = textureSamplerState
         self.mtkView = mtkView
         self.viewModel = viewModel
 
         super.init()
 
         print("Using Metal device: \(device.name)")
+        createFallbackWhiteTexture()
+        loadPlanetTextures()
+
         let highDetailSphere = createSphereMesh(
             latitudeSegments: 24,
             longitudeSegments: 48,
@@ -287,6 +327,11 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
                 longitudeSegments: 10,
                 seed: 0xA511_E901_D00D_0000 &+ UInt64(variant)
             )
+        }
+        do {
+            planetOrbitPaths = try OrbitPathStore.shared.loadPlanetOrbitPaths()
+        } catch {
+            print("Orbit path load warning: \(error.localizedDescription)")
         }
         rebuildCometOrbitBuffer(definitions: viewModel.cometField.definitions)
         rebuildMinorBodyOrbitBuffers(from: viewModel.minorBodyField)
@@ -369,6 +414,48 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         setZoom(zoom * factor)
     }
 
+    func dollyCamera(_ amount: Float) {
+        guard amount.isFinite else { return }
+
+        let scaledAmount = amount * cameraSensitivityMultiplier / max(zoom, 1)
+        cameraPosition += cameraForward() * scaledAmount
+        cameraFocusDistance = max(simd_length(cameraPosition - cameraFocusPoint), 0.1)
+        recalculateProjectionForCurrentView()
+    }
+
+    func centerCamera(on objectName: String) {
+        guard let target = renderPositionForObject(named: objectName) else { return }
+
+        setCameraTargetPreservingView(target)
+    }
+
+    func setCameraLockTarget(_ name: String?) {
+        cameraLockTargetName = name
+    }
+
+    func applyCameraPreset(_ preset: CameraPreset) {
+        cameraFocusDistance = max(simd_length(cameraPosition - cameraFocusPoint), 0.1)
+        let currentTarget = cameraFocusPoint
+
+        switch preset {
+        case .topDown2D:
+            yaw = 0
+            pitch = -Float.pi / 2
+            roll = 0
+        case .angled45:
+            yaw = 0
+            pitch = -Float.pi / 4
+            roll = 0
+        case .flat0:
+            yaw = 0
+            pitch = 0
+            roll = 0
+        }
+
+        cameraPosition = currentTarget - cameraForward() * max(cameraFocusDistance, 0.1)
+        recalculateProjectionForCurrentView()
+    }
+
     func panBy(screenDeltaX dx: Float, screenDeltaY dy: Float) {
         lookBy(screenDeltaX: dx, screenDeltaY: dy)
     }
@@ -377,6 +464,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         let sensitivity = lookSensitivity * cameraSensitivityMultiplier
         yaw += dx * sensitivity
         pitch = min(max(pitch + dy * sensitivity, minimumPitch), maximumPitch)
+        cameraFocusPoint = cameraPosition + cameraForward() * max(cameraFocusDistance, 0.1)
         recalculateProjectionForCurrentView()
     }
 
@@ -388,6 +476,8 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
 
     func resetCamera() {
         cameraPosition = MetalRenderer.defaultCameraPosition
+        cameraFocusPoint = SIMD3<Float>(0, 0, 0)
+        cameraFocusDistance = simd_length(MetalRenderer.defaultCameraPosition)
         yaw = MetalRenderer.defaultYaw
         pitch = MetalRenderer.defaultPitch
         roll = 0
@@ -424,6 +514,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
                 cometInstances: cometInstances,
                 minorBodyInstances: dwarfPlanetInstances + notableAsteroidInstances
             )
+            updateCameraLockTargetIfNeeded()
         } else {
             asteroidVariantInstanceCounts = Array(repeating: 0, count: Self.asteroidVariantCount)
             minorDwarfPlanetInstanceCount = 0
@@ -450,6 +541,70 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
 
     private func advanceDynamicBufferIndex() {
         dynamicBufferIndex = (dynamicBufferIndex + 1) % Self.dynamicBufferCount
+    }
+
+    private func createFallbackWhiteTexture() {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba8Unorm,
+            width: 1,
+            height: 1,
+            mipmapped: false
+        )
+        descriptor.usage = [.shaderRead]
+
+        guard let texture = device.makeTexture(descriptor: descriptor) else {
+            print("Texture load warning: could not create fallback white texture.")
+            return
+        }
+
+        var whitePixel: UInt32 = 0xFFFF_FFFF
+        texture.replace(
+            region: MTLRegionMake2D(0, 0, 1, 1),
+            mipmapLevel: 0,
+            withBytes: &whitePixel,
+            bytesPerRow: MemoryLayout<UInt32>.stride
+        )
+        fallbackWhiteTexture = texture
+    }
+
+    private func loadPlanetTextures() {
+        let options: [MTKTextureLoader.Option: Any] = [
+            .SRGB: true,
+            .generateMipmaps: true
+        ]
+
+        for (bodyName, textureName) in PlanetTextureCatalog.textureNameByBodyName {
+            guard let url = planetTextureURL(named: textureName) else {
+                print("Texture load warning: missing texture resource for \(bodyName) named \(textureName).")
+                continue
+            }
+
+            do {
+                texturesByBodyName[bodyName] = try textureLoader.newTexture(URL: url, options: options)
+            } catch {
+                print("Texture load warning: could not load \(textureName) for \(bodyName): \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func planetTextureURL(named name: String) -> URL? {
+        for fileExtension in ["jpg", "jpeg", "png"] {
+            if let url = Bundle.main.url(forResource: name, withExtension: fileExtension, subdirectory: "Textures/Planets") ??
+                Bundle.main.url(forResource: name, withExtension: fileExtension, subdirectory: "Resources/Textures/Planets") ??
+                Bundle.main.url(forResource: name, withExtension: fileExtension) {
+                return url
+            }
+        }
+
+        return nil
+    }
+
+    private func texture(forBodyName name: String) -> MTLTexture? {
+        texturesByBodyName[name] ?? fallbackWhiteTexture
+    }
+
+    private func hasTexture(forBodyName name: String) -> Bool {
+        texturesByBodyName[name] != nil
     }
 
     private func createSphereMesh(
@@ -481,7 +636,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
                     cosTheta
                 )
 
-                vertices.append(SphereVertex(position: position, normal: position))
+                vertices.append(SphereVertex(position: position, normal: position, uv: SIMD2<Float>(u, v)))
             }
         }
 
@@ -562,7 +717,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
                 let radialScale = 0.65 + coarseNoise * 0.55 + ridgeNoise * 0.15
                 let position = normal * radialScale * stretch
 
-                vertices.append(SphereVertex(position: position, normal: simd_normalize(position)))
+                vertices.append(SphereVertex(position: position, normal: simd_normalize(position), uv: SIMD2<Float>(u, v)))
             }
         }
 
@@ -623,6 +778,8 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         }
 
         majorBodyInstanceCount = bodies.reduce(0) { $0 + (isBodyVisible($1) ? 1 : 0) }
+        majorBodyInstanceTextureNames.removeAll(keepingCapacity: true)
+        majorBodyInstanceTextureNames.reserveCapacity(majorBodyInstanceCount)
 
         Self.ensureBodyInstanceBuffer(
             device: device,
@@ -646,10 +803,12 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             let instance = BodyInstance(
                 positionRadius: SIMD4<Float>(visualRenderPosition(for: body, bodiesByName: bodiesByName), visualRadius(for: body)),
                 color: body.color,
-                material: SIMD4<Float>(body.isStar ? 1 : 0, 0, 0, 0)
+                material: SIMD4<Float>(body.isStar ? 1 : 0, hasTexture(forBodyName: body.name) ? 1 : 0, 0, 0),
+                spinTilt: spinTilt(for: body)
             )
 
             majorBodyPointer?[majorBodyIndex] = instance
+            majorBodyInstanceTextureNames.append(body.name)
             majorBodyIndex += 1
         }
     }
@@ -706,43 +865,33 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     }
 
     private func rebuildStaticOrbitBufferIfNeeded(from bodies: [CelestialBody]) {
-        let signature = bodies.map(\.id)
+        let bodySignature = bodies.map { $0.id.uuidString }.joined(separator: ",")
+        let visibilitySignature = viewModel?.visiblePlanetNames.sorted().joined(separator: ",") ?? ""
+        let signature = bodySignature + "|" + visibilitySignature + "|" + String(planetOrbitPaths.count)
         guard signature != staticOrbitSignature else { return }
 
         staticOrbitSignature = signature
 
-        guard let sun = bodies.first(where: \.isStar) else {
-            staticOrbitVertexCount = 0
-            return
-        }
-
-        let sunPosition = toRenderPosition(sun.initialPosition)
+        let colorByName = Dictionary(uniqueKeysWithValues: bodies.map { ($0.name, $0.color) })
         var vertices: [PathVertex] = []
 
-        for body in bodies where !body.isStar && !body.isAsteroid && !body.isMoon && body.kind != .dwarfPlanet {
-            let bodyPosition = toRenderPosition(body.initialPosition)
-            let radius = simd_length(bodyPosition - sunPosition)
-            guard radius > 0 else { continue }
+        if !planetOrbitPaths.isEmpty {
+            for path in planetOrbitPaths where path.kind == .planet {
+                guard viewModel?.isPlanetVisible(path.objectName) != false,
+                      path.pointsAU.count > 1 else {
+                    continue
+                }
 
-            let color = SIMD4<Float>(body.color.x, body.color.y, body.color.z, 0.22)
+                let baseColor = colorByName[path.objectName] ?? SIMD4<Float>(0.7, 0.7, 0.7, 1)
+                let color = SIMD4<Float>(baseColor.x, baseColor.y, baseColor.z, 0.24)
 
-            for segment in 0..<orbitRingSegmentCount {
-                let startAngle = Float(segment) / Float(orbitRingSegmentCount) * Float.pi * 2
-                let endAngle = Float(segment + 1) / Float(orbitRingSegmentCount) * Float.pi * 2
-                let start = sunPosition + SIMD3<Float>(
-                    cos(startAngle) * radius,
-                    sin(startAngle) * radius,
-                    0
-                )
-                let end = sunPosition + SIMD3<Float>(
-                    cos(endAngle) * radius,
-                    sin(endAngle) * radius,
-                    0
-                )
-
-                vertices.append(PathVertex(position: SIMD4<Float>(start, 1), color: color))
-                vertices.append(PathVertex(position: SIMD4<Float>(end, 1), color: color))
+                for index in 1..<path.pointsAU.count {
+                    vertices.append(PathVertex(position: SIMD4<Float>(path.pointsAU[index - 1], 1), color: color))
+                    vertices.append(PathVertex(position: SIMD4<Float>(path.pointsAU[index], 1), color: color))
+                }
             }
+        } else {
+            appendFallbackCircularOrbitVertices(from: bodies, to: &vertices)
         }
 
         staticOrbitVertexCount = vertices.count
@@ -761,6 +910,44 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
 
         for index in vertices.indices {
             pointer[index] = vertices[index]
+        }
+    }
+
+    private func spinTilt(for body: CelestialBody) -> SIMD4<Float> {
+        guard body.kind == .planet,
+              let facts = PlanetFactCatalog.byName[body.name],
+              facts.rotationPeriodSeconds > 0 else {
+            return SIMD4<Float>(0, 0, 0, 0)
+        }
+
+        let elapsedTime = viewModel?.currentTime ?? 0
+        let direction = facts.isRetrogradeRotation ? -1.0 : 1.0
+        let angle = Float(direction * 2.0 * Double.pi * elapsedTime / facts.rotationPeriodSeconds)
+        let axialTilt = Float(facts.axialTiltDegrees * Double.pi / 180.0)
+        return SIMD4<Float>(angle, axialTilt, 0, 1)
+    }
+
+    private func appendFallbackCircularOrbitVertices(from bodies: [CelestialBody], to vertices: inout [PathVertex]) {
+        guard let sun = bodies.first(where: \.isStar) else { return }
+
+        let sunPosition = toRenderPosition(sun.initialPosition)
+        for body in bodies where !body.isStar && !body.isAsteroid && !body.isMoon && body.kind != .dwarfPlanet {
+            guard viewModel?.isPlanetVisible(body.name) != false else { continue }
+
+            let bodyPosition = toRenderPosition(body.initialPosition)
+            let radius = simd_length(bodyPosition - sunPosition)
+            guard radius > 0 else { continue }
+
+            let color = SIMD4<Float>(body.color.x, body.color.y, body.color.z, 0.16)
+
+            for segment in 0..<orbitRingSegmentCount {
+                let startAngle = Float(segment) / Float(orbitRingSegmentCount) * Float.pi * 2
+                let endAngle = Float(segment + 1) / Float(orbitRingSegmentCount) * Float.pi * 2
+                let start = sunPosition + SIMD3<Float>(cos(startAngle) * radius, sin(startAngle) * radius, 0)
+                let end = sunPosition + SIMD3<Float>(cos(endAngle) * radius, sin(endAngle) * radius, 0)
+                vertices.append(PathVertex(position: SIMD4<Float>(start, 1), color: color))
+                vertices.append(PathVertex(position: SIMD4<Float>(end, 1), color: color))
+            }
         }
     }
 
@@ -830,8 +1017,37 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         pickableObjects = objects
     }
 
+    private func renderPositionForObject(named name: String) -> SIMD3<Float>? {
+        let bodiesByName = Dictionary(uniqueKeysWithValues: currentBodies.map { ($0.name, $0) })
+        if let body = bodiesByName[name], isBodyVisible(body) {
+            return visualRenderPosition(for: body, bodiesByName: bodiesByName)
+        }
+
+        return pickableObjects.first { $0.name == name }?.worldPositionAU
+    }
+
+    private func updateCameraLockTargetIfNeeded() {
+        guard let cameraLockTargetName,
+              let targetPosition = renderPositionForObject(named: cameraLockTargetName) else {
+            return
+        }
+
+        setCameraTargetPreservingView(targetPosition)
+    }
+
+    private func setCameraTargetPreservingView(_ target: SIMD3<Float>) {
+        cameraFocusDistance = max(simd_length(cameraPosition - cameraFocusPoint), 0.1)
+        cameraFocusPoint = target
+        cameraPosition = target - cameraForward() * cameraFocusDistance
+        recalculateProjectionForCurrentView()
+    }
+
     private func isBodyVisible(_ body: CelestialBody) -> Bool {
         guard !body.isAsteroid else { return false }
+
+        if body.kind == .planet, viewModel?.isPlanetVisible(body.name) == false {
+            return false
+        }
 
         if body.kind == .dwarfPlanet || body.parentName == "Pluto" {
             return viewModel?.showDwarfPlanets != false
@@ -1011,6 +1227,8 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         notableAsteroids: [MinorBodyVisualInstance]
     ) {
         minorDwarfPlanetInstanceCount = dwarfPlanets.count
+        minorDwarfPlanetInstanceTextureNames.removeAll(keepingCapacity: true)
+        minorDwarfPlanetInstanceTextureNames.reserveCapacity(minorDwarfPlanetInstanceCount)
         minorAsteroidVariantInstanceCounts = Array(repeating: 0, count: Self.asteroidVariantCount)
 
         if minorDwarfPlanetInstanceCount > 0 {
@@ -1050,8 +1268,9 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
                 dwarfPointer[index] = BodyInstance(
                     positionRadius: SIMD4<Float>(instance.positionAU, instance.renderRadiusAU * radiusScale),
                     color: instance.color,
-                    material: SIMD4<Float>(0, 0, 0, 0)
+                    material: SIMD4<Float>(0, hasTexture(forBodyName: instance.definition.name) ? 1 : 0, 0, 0)
                 )
+                minorDwarfPlanetInstanceTextureNames.append(instance.definition.name)
             }
         }
 
@@ -1421,24 +1640,17 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         encoder.setDepthStencilState(bodyDepthStencilState)
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 2)
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
+        encoder.setFragmentSamplerState(textureSamplerState, index: 0)
 
-        drawInstancedBodies(
-            encoder: encoder,
-            vertexBuffer: highDetailSphereVertexBuffer,
-            indexBuffer: highDetailSphereIndexBuffer,
-            indexCount: highDetailSphereIndexCount,
-            instanceBuffer: majorBodyInstanceBuffers[dynamicBufferIndex],
-            instanceCount: majorBodyInstanceCount
-        )
+        drawTexturedMajorBodies(encoder: encoder)
+        if let fallbackWhiteTexture {
+            encoder.setFragmentTexture(fallbackWhiteTexture, index: 0)
+        }
 
-        drawInstancedBodies(
-            encoder: encoder,
-            vertexBuffer: highDetailSphereVertexBuffer,
-            indexBuffer: highDetailSphereIndexBuffer,
-            indexCount: highDetailSphereIndexCount,
-            instanceBuffer: minorDwarfPlanetInstanceBuffers[dynamicBufferIndex],
-            instanceCount: minorDwarfPlanetInstanceCount
-        )
+        drawTexturedMinorDwarfPlanets(encoder: encoder)
+        if let fallbackWhiteTexture {
+            encoder.setFragmentTexture(fallbackWhiteTexture, index: 0)
+        }
 
         for variant in 0..<min(asteroidMeshVariants.count, Self.asteroidVariantCount) {
             let mesh = asteroidMeshVariants[variant]
@@ -1468,6 +1680,71 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
                 indexCount: cometMesh.indexCount,
                 instanceBuffer: cometNucleusInstanceBuffers[dynamicBufferIndex],
                 instanceCount: cometNucleusInstanceCount
+            )
+        }
+    }
+
+    private func drawTexturedMajorBodies(encoder: MTLRenderCommandEncoder) {
+        drawTexturedBodies(
+            encoder: encoder,
+            vertexBuffer: highDetailSphereVertexBuffer,
+            indexBuffer: highDetailSphereIndexBuffer,
+            indexCount: highDetailSphereIndexCount,
+            instanceBuffer: majorBodyInstanceBuffers[dynamicBufferIndex],
+            instanceCount: majorBodyInstanceCount,
+            textureNames: majorBodyInstanceTextureNames
+        )
+    }
+
+    private func drawTexturedMinorDwarfPlanets(encoder: MTLRenderCommandEncoder) {
+        drawTexturedBodies(
+            encoder: encoder,
+            vertexBuffer: highDetailSphereVertexBuffer,
+            indexBuffer: highDetailSphereIndexBuffer,
+            indexCount: highDetailSphereIndexCount,
+            instanceBuffer: minorDwarfPlanetInstanceBuffers[dynamicBufferIndex],
+            instanceCount: minorDwarfPlanetInstanceCount,
+            textureNames: minorDwarfPlanetInstanceTextureNames
+        )
+    }
+
+    private func drawTexturedBodies(
+        encoder: MTLRenderCommandEncoder,
+        vertexBuffer: MTLBuffer?,
+        indexBuffer: MTLBuffer?,
+        indexCount: Int,
+        instanceBuffer: MTLBuffer?,
+        instanceCount: Int,
+        textureNames: [String]
+    ) {
+        guard let vertexBuffer,
+              let indexBuffer,
+              let instanceBuffer,
+              indexCount > 0,
+              instanceCount > 0 else {
+            return
+        }
+
+        encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
+
+        for index in 0..<instanceCount {
+            let bodyName = index < textureNames.count ? textureNames[index] : ""
+            if let texture = texture(forBodyName: bodyName) {
+                encoder.setFragmentTexture(texture, index: 0)
+            }
+
+            encoder.setVertexBuffer(
+                instanceBuffer,
+                offset: MemoryLayout<BodyInstance>.stride * index,
+                index: 1
+            )
+            encoder.drawIndexedPrimitives(
+                type: .triangle,
+                indexCount: indexCount,
+                indexType: .uint16,
+                indexBuffer: indexBuffer,
+                indexBufferOffset: 0,
+                instanceCount: 1
             )
         }
     }
@@ -1669,8 +1946,19 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
                     + basis.up * verticalInput
             )
             let speed = movementSpeed * cameraSensitivityMultiplier / max(zoom, 1)
+            let movementDelta = movementDirection * speed * deltaTime
 
-            cameraPosition += movementDirection * speed * deltaTime
+            cameraPosition += movementDelta
+
+            let centerPanDelta = (basis.right * movementInput.x + basis.up * verticalInput) * speed * deltaTime
+            if simd_length_squared(centerPanDelta) > 0 {
+                cameraFocusPoint += centerPanDelta
+            }
+            cameraFocusDistance = max(simd_length(cameraPosition - cameraFocusPoint), 0.1)
+        }
+
+        if hasLook {
+            cameraFocusPoint = cameraPosition + cameraForward() * max(cameraFocusDistance, 0.1)
         }
 
         calculateProjectionMatrix(drawableSize: view.drawableSize)

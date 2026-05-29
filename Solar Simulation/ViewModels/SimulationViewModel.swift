@@ -15,18 +15,34 @@ final class SimulationViewModel: ObservableObject {
     @Published var simulatedDaysPerSecond: Double = 10
     @Published var directTimeStepMultiplier: Double = 1
     @Published var cameraSensitivity: Double = 1.0
-    @Published var showAsteroidBelt = true
-    @Published var showComets = true
-    @Published var showDwarfPlanets = true
-    @Published var showNotableAsteroids = true
+    @Published var showAsteroidBelt = true {
+        didSet { validateCameraLockTarget() }
+    }
+    @Published var showComets = true {
+        didSet { validateCameraLockTarget() }
+    }
+    @Published var showDwarfPlanets = true {
+        didSet { validateCameraLockTarget() }
+    }
+    @Published var showNotableAsteroids = true {
+        didSet { validateCameraLockTarget() }
+    }
     @Published var showLiveTrails = true
     @Published var showPretracedOrbitPaths = true
+    @Published var visiblePlanetNames: Set<String> = Set(PlanetFactCatalog.planetNames)
+    @Published var requestedCameraTargetName: String?
+    @Published var requestedCameraPreset: CameraPreset?
+    @Published var cameraLockTargetName: String?
     @Published var selectedObjectInfo: SelectedObjectInfo?
     @Published private(set) var cameraResetRequestID = 0
     @Published private(set) var asteroidField = AsteroidField(count: 0)
     let ephemerisPresets = EphemerisPresetCatalog.presets
     let cometField = CometVisualField()
     let minorBodyField = MinorBodyVisualField()
+
+    var cameraLockDisplayName: String {
+        cameraLockTargetName ?? "None"
+    }
 
     private let simulationWorker = SimulationWorker()
     private var simulationTask: Task<Void, Never>?
@@ -186,6 +202,7 @@ final class SimulationViewModel: ObservableObject {
     private func setBodies(_ newBodies: [CelestialBody], resetCamera: Bool) {
         bodies = newBodies
         updateSelectedObjectInfo()
+        validateCameraLockTarget()
 
         if resetCamera {
             cameraResetRequestID += 1
@@ -262,6 +279,107 @@ final class SimulationViewModel: ObservableObject {
                 self.updateSelectedObjectInfo()
             }
         }
+    }
+
+    var cameraLockTargets: [CameraLockTarget] {
+        var targets: [CameraLockTarget] = []
+
+        for body in bodies where shouldShowInCameraLockMenu(body) {
+            targets.append(CameraLockTarget(id: body.name, name: body.name, kind: body.kind))
+        }
+
+        if showDwarfPlanets {
+            targets.append(
+                contentsOf: DwarfPlanetCatalog.recognizedDwarfPlanets.map {
+                    CameraLockTarget(id: $0.name, name: $0.name, kind: .dwarfPlanet)
+                }
+            )
+        }
+
+        if showNotableAsteroids {
+            targets.append(
+                contentsOf: NotableAsteroidCatalog.notableAsteroids.map {
+                    CameraLockTarget(id: $0.name, name: $0.name, kind: .asteroid)
+                }
+            )
+        }
+
+        if showComets {
+            targets.append(
+                contentsOf: CometCatalog.notableComets.map {
+                    CameraLockTarget(id: $0.name, name: $0.name, kind: .comet)
+                }
+            )
+        }
+
+        if showAsteroidBelt {
+            targets.append(CameraLockTarget(id: "Asteroid Belt", name: "Asteroid Belt", kind: .asteroidBelt))
+        }
+
+        var seen = Set<String>()
+        let uniqueTargets = targets.filter { target in
+            if seen.contains(target.id) {
+                return false
+            }
+
+            seen.insert(target.id)
+            return true
+        }
+
+        return uniqueTargets.sorted {
+            if $0.kind.sortOrder != $1.kind.sortOrder {
+                return $0.kind.sortOrder < $1.kind.sortOrder
+            }
+
+            return $0.name < $1.name
+        }
+    }
+
+    func isPlanetVisible(_ name: String) -> Bool {
+        visiblePlanetNames.contains(name)
+    }
+
+    func setPlanetVisible(_ name: String, isVisible: Bool) {
+        if isVisible {
+            visiblePlanetNames.insert(name)
+        } else {
+            visiblePlanetNames.remove(name)
+        }
+
+        validateCameraLockTarget()
+    }
+
+    func lockCamera(to objectName: String?) {
+        cameraLockTargetName = objectName
+        validateCameraLockTarget()
+    }
+
+    func clearCameraLock() {
+        cameraLockTargetName = nil
+    }
+
+    func validateCameraLockTarget() {
+        guard let cameraLockTargetName else { return }
+
+        if !cameraLockTargets.contains(where: { $0.id == cameraLockTargetName }) {
+            clearCameraLock()
+        }
+    }
+
+    func centerCameraOnObject(named name: String) {
+        requestedCameraTargetName = name
+    }
+
+    func clearCameraTargetRequest() {
+        requestedCameraTargetName = nil
+    }
+
+    func requestCameraPreset(_ preset: CameraPreset) {
+        requestedCameraPreset = preset
+    }
+
+    func clearCameraPresetRequest() {
+        requestedCameraPreset = nil
     }
 
     func selectObject(named name: String) {
@@ -397,6 +515,22 @@ final class SimulationViewModel: ObservableObject {
         lastFrameTime = nil
     }
 
+    private func shouldShowInCameraLockMenu(_ body: CelestialBody) -> Bool {
+        switch body.kind {
+        case .star, .moon:
+            if body.parentName == "Pluto" {
+                return showDwarfPlanets
+            }
+            return true
+        case .planet:
+            return visiblePlanetNames.contains(body.name)
+        case .dwarfPlanet:
+            return showDwarfPlanets
+        default:
+            return false
+        }
+    }
+
     private func makeSelectedInfo(for body: CelestialBody, bodies: [CelestialBody]) -> SelectedObjectInfo {
         let sun = bodies.first(where: \.isStar)
         let parent = body.parentName.flatMap { parentName in
@@ -406,6 +540,7 @@ final class SimulationViewModel: ObservableObject {
         let distanceToParent = parent.map { simd_length(body.position - $0.position) }
         let speed = simd_length(body.velocity)
         let circumference = 2 * Double.pi * body.visualRadius
+        let planetFacts = PlanetFactCatalog.byName[body.name]
         let orbitalPeriod = body.orbitalPeriodSeconds
             ?? body.orbitalRadius.flatMap { radius in
                 guard let orbitalSpeed = body.orbitalSpeed, orbitalSpeed > 0 else { return nil }
@@ -425,6 +560,11 @@ final class SimulationViewModel: ObservableObject {
             distanceToSunMeters: body.isStar ? nil : distanceToSun,
             distanceToParentMeters: distanceToParent,
             orbitalPeriodSeconds: body.isStar ? nil : orbitalPeriod,
+            axialTiltDegrees: planetFacts?.axialTiltDegrees,
+            rotationPeriodHours: planetFacts?.rotationPeriodHours,
+            lengthOfDayHours: planetFacts?.lengthOfDayHours,
+            orbitalPeriodYears: planetFacts?.orbitalPeriodYears,
+            rotationDirection: planetFacts?.rotationDirection,
             speedMetersPerSecond: speed,
             apsisPhase: apsisPhase(for: body, primary: parent ?? sun),
             notes: nil
@@ -463,6 +603,11 @@ final class SimulationViewModel: ObservableObject {
             distanceToSunMeters: distanceToSun,
             distanceToParentMeters: nil,
             orbitalPeriodSeconds: orbitalPeriod,
+            axialTiltDegrees: nil,
+            rotationPeriodHours: nil,
+            lengthOfDayHours: nil,
+            orbitalPeriodYears: nil,
+            rotationDirection: nil,
             speedMetersPerSecond: speed,
             apsisPhase: apsisPhase,
             notes: [comet.notes, "Analytic visual comet; not N-body simulated."].compactMap { $0 }.joined(separator: " ")
@@ -502,6 +647,11 @@ final class SimulationViewModel: ObservableObject {
             distanceToSunMeters: distanceToSun,
             distanceToParentMeters: nil,
             orbitalPeriodSeconds: minorBody.orbitalPeriodSeconds,
+            axialTiltDegrees: nil,
+            rotationPeriodHours: nil,
+            lengthOfDayHours: nil,
+            orbitalPeriodYears: nil,
+            rotationDirection: nil,
             speedMetersPerSecond: speed,
             apsisPhase: apsisPhase,
             notes: [minorBody.notes, "Analytic visual object; not N-body simulated."].compactMap { $0 }.joined(separator: " ")
@@ -521,6 +671,11 @@ final class SimulationViewModel: ObservableObject {
             distanceToSunMeters: 2.7 * SolarSystemConstants.astronomicalUnit,
             distanceToParentMeters: nil,
             orbitalPeriodSeconds: nil,
+            axialTiltDegrees: nil,
+            rotationPeriodHours: nil,
+            lengthOfDayHours: nil,
+            orbitalPeriodYears: nil,
+            rotationDirection: nil,
             speedMetersPerSecond: nil,
             apsisPhase: .notApplicable,
             notes: "Aesthetic asteroid field; not N-body simulated. Individual asteroids use analytic visual orbits."

@@ -25,6 +25,7 @@ struct SimulationViewContainer: NSViewRepresentable {
         let selectionViewModel = viewModel
         let renderer = MetalRenderer(mtkView: mtkView, viewModel: viewModel)
         renderer.setCameraSensitivityMultiplier(Float(viewModel.cameraSensitivity))
+        renderer.setCameraLockTarget(viewModel.cameraLockTargetName)
         renderer.onObjectSelected = { [weak selectionViewModel] selectedName in
             Task { @MainActor in
                 selectionViewModel?.selectObject(named: selectedName)
@@ -38,8 +39,8 @@ struct SimulationViewContainer: NSViewRepresentable {
         context.coordinator.renderer = renderer
         mtkView.delegate = renderer
 
-        mtkView.onScroll = { [weak renderer] factor in
-            renderer?.zoomBy(factor)
+        mtkView.onScroll = { [weak renderer] amount in
+            renderer?.dollyCamera(amount)
         }
 
         mtkView.onDrag = { [weak renderer] dx, dy in
@@ -63,10 +64,21 @@ struct SimulationViewContainer: NSViewRepresentable {
 
         renderer.updateBodies(viewModel.bodies)
         renderer.setCameraSensitivityMultiplier(Float(viewModel.cameraSensitivity))
+        renderer.setCameraLockTarget(viewModel.cameraLockTargetName)
 
         if context.coordinator.lastCameraResetRequestID != viewModel.cameraResetRequestID {
             renderer.resetCamera()
             context.coordinator.lastCameraResetRequestID = viewModel.cameraResetRequestID
+        }
+
+        if let targetName = viewModel.requestedCameraTargetName {
+            renderer.centerCamera(on: targetName)
+            viewModel.clearCameraTargetRequest()
+        }
+
+        if let preset = viewModel.requestedCameraPreset {
+            renderer.applyCameraPreset(preset)
+            viewModel.clearCameraPresetRequest()
         }
     }
 

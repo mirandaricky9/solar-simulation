@@ -27,23 +27,41 @@ store the data somehow to avoid recalculations.
 change it to specific lengths for all planets
 
 
-## Ephemeris snapshots
+## Ephemeris and orbit paths
 Initial solar-system positions are loaded from bundled NASA/JPL Horizons vector snapshots.
 The app uses 12:00:00 UTC for each preset date and displays the simulation date in UTC.
+Pretraced planet orbit paths are generated from NASA/JPL Horizons sampled positions.
+Live trails are local simulation history and may diverge from the reference paths if the
+simplified integrator or timestep drifts. Planet spin, axial tilt, day, and year metadata
+use NASA/JPL Solar System Dynamics and NASA Planetary Fact Sheet style values.
 
 To regenerate the bundled data, run:
 
 ```bash
 python3 Tools/generate_ephemeris_snapshots.py
+python3 Tools/generate_orbit_paths.py
 ```
 
 If the local Python certificate store cannot verify JPL's certificate chain, use:
 
 ```bash
 python3 Tools/generate_ephemeris_snapshots.py --insecure
+python3 Tools/generate_orbit_paths.py --insecure
 ```
 
 Snapshots are written to `Solar Simulation/Resources/EphemerisSnapshots/` and bundled with the app.
+Orbit paths are written to `Solar Simulation/Resources/OrbitPaths/` and bundled with the app.
 The simulation integrates forward from the selected snapshot, so long runs can drift from
 NASA/JPL ephemerides until refreshed by jumping to another bundled snapshot. A future
 accuracy upgrade would use SPICE/SPK interpolation for arbitrary-date positions.
+
+## Texture assets
+Planet texture maps live in `Solar Simulation/Resources/Textures/Planets/`.
+The bundled Sun, planet, Moon, and Ceres maps are from Solar System Scope textures:
+https://www.solarsystemscope.com/textures/
+
+Solar System Scope textures are distributed under Creative Commons Attribution 4.0
+International. The Pluto map is from NASA/Wikimedia Commons public-domain imagery.
+Recommended public/free sources for future texture updates include NASA 3D Resources,
+NASA Solar System Treks, USGS Astrogeology planetary maps, and Solar System Scope
+textures under CC BY 4.0.

@@ -5,6 +5,8 @@ struct SimulationSideMenu: View {
     let onClose: () -> Void
 
     @State private var showDateControls = true
+    @State private var showCameraControls = true
+    @State private var showPlanetControls = true
     @State private var showOrbitControls = true
     @State private var showObjectControls = true
     @State private var showInfoControls = false
@@ -51,6 +53,86 @@ struct SimulationSideMenu: View {
                             .font(.caption)
                             .foregroundStyle(.red)
                             .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(.leading, 8)
+                .padding(.top, 6)
+            }
+
+            DisclosureGroup("Camera", isExpanded: $showCameraControls) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Lock Onto")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Picker(
+                        "Lock Onto",
+                        selection: Binding<String>(
+                            get: { viewModel.cameraLockTargetName ?? "None" },
+                            set: { newValue in
+                                if newValue == "None" {
+                                    viewModel.clearCameraLock()
+                                } else {
+                                    viewModel.lockCamera(to: newValue)
+                                }
+                            }
+                        )
+                    ) {
+                        Text("None").tag("None")
+
+                        ForEach(viewModel.cameraLockTargets) { target in
+                            Text("\(target.name) (\(target.kind.rawValue))")
+                                .tag(target.id)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+
+                    Button("Clear Camera Lock") {
+                        viewModel.clearCameraLock()
+                    }
+                    .disabled(viewModel.cameraLockTargetName == nil)
+
+                    Divider()
+
+                    Button("Top Down 2D") {
+                        viewModel.requestCameraPreset(.topDown2D)
+                    }
+
+                    Button("Angled 45°") {
+                        viewModel.requestCameraPreset(.angled45)
+                    }
+
+                    Button("Flat 0°") {
+                        viewModel.requestCameraPreset(.flat0)
+                    }
+                }
+                .padding(.leading, 8)
+                .padding(.top, 6)
+            }
+
+            DisclosureGroup("Planets", isExpanded: $showPlanetControls) {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(PlanetFactCatalog.planetNames, id: \.self) { planetName in
+                        HStack {
+                            Toggle(
+                                planetName,
+                                isOn: Binding(
+                                    get: { viewModel.visiblePlanetNames.contains(planetName) },
+                                    set: { viewModel.setPlanetVisible(planetName, isVisible: $0) }
+                                )
+                            )
+
+                            Spacer()
+
+                            Button {
+                                viewModel.centerCameraOnObject(named: planetName)
+                            } label: {
+                                Image(systemName: "scope")
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Center camera on \(planetName)")
+                        }
                     }
                 }
                 .padding(.leading, 8)

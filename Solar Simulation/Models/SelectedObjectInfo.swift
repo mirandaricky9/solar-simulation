@@ -36,6 +36,11 @@ nonisolated struct SelectedObjectInfo: Identifiable, Equatable, Sendable {
     let distanceToSunMeters: Double?
     let distanceToParentMeters: Double?
     let orbitalPeriodSeconds: Double?
+    let axialTiltDegrees: Double?
+    let rotationPeriodHours: Double?
+    let lengthOfDayHours: Double?
+    let orbitalPeriodYears: Double?
+    let rotationDirection: String?
     let speedMetersPerSecond: Double?
     let apsisPhase: ApsisPhase
     let notes: String?

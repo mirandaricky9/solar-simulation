@@ -100,11 +100,10 @@ final class InteractiveMetalView: MTKView {
 
     override func scrollWheel(with event: NSEvent) {
         let delta = Float(event.scrollingDeltaY)
+        let scrollDollySensitivity: Float = 0.08
 
-        if delta > 0 {
-            onScroll?(1.1)
-        } else if delta < 0 {
-            onScroll?(0.9)
+        if delta != 0 {
+            onScroll?(delta * scrollDollySensitivity)
         }
     }
 

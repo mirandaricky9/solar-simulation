@@ -59,6 +59,26 @@ struct SelectedObjectInfoPanel: View {
                 infoRow("Orbital Period", formatPeriod(orbitalPeriodSeconds))
             }
 
+            if let orbitalPeriodYears = info.orbitalPeriodYears {
+                infoRow("Year", formatYear(orbitalPeriodYears))
+            }
+
+            if let lengthOfDayHours = info.lengthOfDayHours {
+                infoRow("Day", formatHours(lengthOfDayHours))
+            }
+
+            if let rotationPeriodHours = info.rotationPeriodHours {
+                infoRow("Sidereal Rotation", formatHours(rotationPeriodHours))
+            }
+
+            if let rotationDirection = info.rotationDirection {
+                infoRow("Rotation", rotationDirection)
+            }
+
+            if let axialTiltDegrees = info.axialTiltDegrees {
+                infoRow("Axial Tilt", String(format: "%.2f°", axialTiltDegrees))
+            }
+
             if let speedMetersPerSecond = info.speedMetersPerSecond {
                 infoRow("Speed", formatSpeed(speedMetersPerSecond))
             }
@@ -130,6 +150,15 @@ struct SelectedObjectInfoPanel: View {
         }
 
         return String(format: "%.2f days", days)
+    }
+
+    private func formatYear(_ years: Double) -> String {
+        let days = years * 365.25
+        return String(format: "%.3f years (%.2f days)", years, days)
+    }
+
+    private func formatHours(_ hours: Double) -> String {
+        String(format: "%.4g hours", abs(hours))
     }
 
     private func formatSpeed(_ metersPerSecond: Double) -> String {

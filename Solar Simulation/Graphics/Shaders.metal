@@ -4,13 +4,35 @@ using namespace metal;
 struct SphereVertex {
     float3 position;
     float3 normal;
+    float2 uv;
 };
 
 struct BodyInstance {
     float4 positionRadius;
     float4 color;
     float4 material;
+    float4 spinTilt;
 };
+
+float3 rotateAroundZ(float3 value, float angle) {
+    float c = cos(angle);
+    float s = sin(angle);
+    return float3(
+        value.x * c - value.y * s,
+        value.x * s + value.y * c,
+        value.z
+    );
+}
+
+float3 rotateAroundX(float3 value, float angle) {
+    float c = cos(angle);
+    float s = sin(angle);
+    return float3(
+        value.x,
+        value.y * c - value.z * s,
+        value.y * s + value.z * c
+    );
+}
 
 struct Uniforms {
     float4x4 viewProjectionMatrix;
@@ -24,6 +46,10 @@ struct BodyOut {
     float3 normal;
     float4 color;
     float emission;
+    float2 uv;
+    float3 localDirection;
+    float spinEnabled;
+    float textureBlend;
 };
 
 vertex BodyOut bodyVertexShader(
@@ -36,23 +62,42 @@ vertex BodyOut bodyVertexShader(
     BodyInstance instance = instances[instanceID];
     SphereVertex sphereVertex = vertices[vertexID];
     float radius = instance.positionRadius.w;
-    float3 world = instance.positionRadius.xyz + sphereVertex.position * radius;
+    float3 localPosition = sphereVertex.position;
+    float3 localNormal = sphereVertex.normal;
+
+    if (instance.spinTilt.w > 0.5) {
+        localPosition = rotateAroundX(rotateAroundZ(localPosition, instance.spinTilt.x), instance.spinTilt.y);
+        localNormal = rotateAroundX(rotateAroundZ(localNormal, instance.spinTilt.x), instance.spinTilt.y);
+    }
+
+    float3 world = instance.positionRadius.xyz + localPosition * radius;
 
     BodyOut out;
     out.position = uniforms.viewProjectionMatrix * float4(world, 1.0);
     out.worldPosition = world;
-    out.normal = normalize(sphereVertex.normal);
+    out.normal = normalize(localNormal);
     out.color = instance.color;
     out.emission = instance.material.x;
+    out.uv = sphereVertex.uv;
+    out.localDirection = normalize(localPosition);
+    out.spinEnabled = instance.spinTilt.w;
+    out.textureBlend = instance.material.y;
     return out;
 }
 
 fragment float4 bodyFragmentShader(
     BodyOut in [[stage_in]],
-    constant Uniforms &uniforms [[buffer(0)]]
+    constant Uniforms &uniforms [[buffer(0)]],
+    texture2d<float> colorTexture [[texture(0)]],
+    sampler textureSampler [[sampler(0)]]
 ) {
+    float4 sampledColor = colorTexture.sample(textureSampler, in.uv);
+    float textureBlend = clamp(in.textureBlend, 0.0, 1.0);
+    float3 surfaceColor = mix(in.color.rgb * sampledColor.rgb, sampledColor.rgb, textureBlend);
+    float alpha = in.color.a * sampledColor.a;
+
     if (in.emission > 0.5) {
-        return float4(min(in.color.rgb * 1.35, float3(1.0)), in.color.a);
+        return float4(min(surfaceColor * 1.35, float3(1.0)), alpha);
     }
 
     float3 normal = normalize(in.normal);
@@ -63,9 +108,18 @@ fragment float4 bodyFragmentShader(
     float diffuse = max(dot(normal, toLight), 0.0);
     float specular = pow(max(dot(normal, halfVector), 0.0), 36.0) * 0.28;
     float rim = pow(1.0 - max(dot(normal, toCamera), 0.0), 2.0) * 0.16;
-    float3 litColor = in.color.rgb * (0.20 + diffuse * 0.86 + rim) + float3(specular);
 
-    return float4(litColor, in.color.a);
+    if (in.spinEnabled > 0.5 && textureBlend < 0.5) {
+        float latitudeBand = 0.5 + 0.5 * sin(in.localDirection.z * 34.0);
+        float longitude = atan2(in.localDirection.y, in.localDirection.x);
+        float meridian = smoothstep(0.965, 1.0, abs(sin(longitude * 12.0)));
+        surfaceColor *= 0.88 + latitudeBand * 0.16;
+        surfaceColor = mix(surfaceColor, min(surfaceColor + 0.10, float3(1.0)), meridian * 0.22);
+    }
+
+    float3 litColor = surfaceColor * (0.20 + diffuse * 0.86 + rim) + float3(specular);
+
+    return float4(litColor, alpha);
 }
 
 struct PathVertex {
