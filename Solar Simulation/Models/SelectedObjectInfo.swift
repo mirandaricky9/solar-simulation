@@ -7,6 +7,8 @@ nonisolated enum CelestialObjectKind: String, Codable, Hashable, Sendable {
     case comet = "Comet"
     case asteroid = "Asteroid"
     case asteroidBelt = "Asteroid Belt"
+    case kuiperBelt = "Kuiper Belt"
+    case oortCloud = "Oort Cloud"
     case dwarfPlanet = "Dwarf Planet"
     case unknown = "Unknown"
 }
@@ -39,8 +41,13 @@ nonisolated struct SelectedObjectInfo: Identifiable, Equatable, Sendable {
     let axialTiltDegrees: Double?
     let rotationPeriodHours: Double?
     let lengthOfDayHours: Double?
+    let lengthOfDayEarthDays: Double?
     let orbitalPeriodYears: Double?
     let rotationDirection: String?
+    let bodyClass: String?
+    let primaryComposition: String?
+    let surfaceAreaSquareKilometers: Double?
+    let wikipediaURLString: String?
     let speedMetersPerSecond: Double?
     let apsisPhase: ApsisPhase
     let notes: String?

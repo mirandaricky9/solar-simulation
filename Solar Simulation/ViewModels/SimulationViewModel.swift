@@ -15,6 +15,7 @@ final class SimulationViewModel: ObservableObject {
     @Published var simulatedDaysPerSecond: Double = 10
     @Published var directTimeStepMultiplier: Double = 1
     @Published var cameraSensitivity: Double = 1.0
+    @Published var scaleMode: SimulationScaleMode = .enhanced
     @Published var showAsteroidBelt = true {
         didSet { validateCameraLockTarget() }
     }
@@ -25,6 +26,12 @@ final class SimulationViewModel: ObservableObject {
         didSet { validateCameraLockTarget() }
     }
     @Published var showNotableAsteroids = true {
+        didSet { validateCameraLockTarget() }
+    }
+    @Published var showKuiperBelt = true {
+        didSet { validateCameraLockTarget() }
+    }
+    @Published var showOortCloud = false {
         didSet { validateCameraLockTarget() }
     }
     @Published var showLiveTrails = true
@@ -39,6 +46,8 @@ final class SimulationViewModel: ObservableObject {
     let ephemerisPresets = EphemerisPresetCatalog.presets
     let cometField = CometVisualField()
     let minorBodyField = MinorBodyVisualField()
+    let kuiperBeltField = KuiperBeltVisualField(count: 15_000)
+    let oortCloudField = OortCloudVisualField(count: 20_000)
 
     var cameraLockDisplayName: String {
         cameraLockTargetName ?? "None"
@@ -57,6 +66,8 @@ final class SimulationViewModel: ObservableObject {
     private let publishedSnapshotInterval = 2
     private let defaultAsteroidVisualCount = 8_000
     private let asteroidBeltSelectionID = UUID(uuidString: "D78A4AF8-711E-4B56-9E33-5AFD02909346")!
+    private let kuiperBeltSelectionID = UUID(uuidString: "AEF10CF5-D9D2-43A2-B1E2-504A94A5D7F1")!
+    private let oortCloudSelectionID = UUID(uuidString: "BB08BF9D-B33A-4669-A79E-0E683449B3A1")!
     private var currentEphemerisSnapshot: EphemerisSnapshot?
     private var ephemerisVisualStatesByName: [String: EphemerisBodyState] = [:]
 
@@ -316,6 +327,14 @@ final class SimulationViewModel: ObservableObject {
             targets.append(CameraLockTarget(id: "Asteroid Belt", name: "Asteroid Belt", kind: .asteroidBelt))
         }
 
+        if showKuiperBelt {
+            targets.append(CameraLockTarget(id: "Kuiper Belt", name: "Kuiper Belt", kind: .kuiperBelt))
+        }
+
+        if showOortCloud {
+            targets.append(CameraLockTarget(id: "Oort Cloud", name: "Oort Cloud", kind: .oortCloud))
+        }
+
         var seen = Set<String>()
         let uniqueTargets = targets.filter { target in
             if seen.contains(target.id) {
@@ -438,7 +457,35 @@ final class SimulationViewModel: ObservableObject {
         }
 
         if selectedObjectName == "Asteroid Belt" {
-            selectedObjectInfo = makeAsteroidBeltInfo()
+            selectedObjectInfo = makeAggregateBeltInfo(
+                name: "Asteroid Belt",
+                kind: .asteroidBelt,
+                distanceRangeAU: "2.1-3.4 AU",
+                distanceToSunAU: 2.7,
+                notes: "Aesthetic asteroid field; not N-body simulated. Individual asteroids use analytic visual orbits."
+            )
+            return
+        }
+
+        if selectedObjectName == "Kuiper Belt" {
+            selectedObjectInfo = makeAggregateBeltInfo(
+                name: "Kuiper Belt",
+                kind: .kuiperBelt,
+                distanceRangeAU: "about 30-55 AU",
+                distanceToSunAU: 42.0,
+                notes: "Visual-only icy trans-Neptunian object field. NASA describes the Kuiper Belt as a puffed-up disk or donut beginning around Neptune."
+            )
+            return
+        }
+
+        if selectedObjectName == "Oort Cloud" {
+            selectedObjectInfo = makeAggregateBeltInfo(
+                name: "Oort Cloud",
+                kind: .oortCloud,
+                distanceRangeAU: "about 5,000-100,000 AU",
+                distanceToSunAU: 5_000,
+                notes: "Theoretical distant spherical shell of icy objects; visual-only and not N-body simulated."
+            )
             return
         }
 
@@ -547,6 +594,9 @@ final class SimulationViewModel: ObservableObject {
                 return 2 * Double.pi * radius / orbitalSpeed
             }
             ?? estimateOrbitalPeriod(distanceMeters: distanceToParent ?? distanceToSun, speedMetersPerSecond: speed)
+        let rotationFacts = rotationFacts(for: body, orbitalPeriodSeconds: orbitalPeriod)
+        let lengthOfDayHours = planetFacts?.lengthOfDayHours ?? rotationFacts?.rotationPeriodHours
+        let composition = compositionFacts(for: body.name, kind: body.kind)
 
         return SelectedObjectInfo(
             id: body.id,
@@ -560,14 +610,19 @@ final class SimulationViewModel: ObservableObject {
             distanceToSunMeters: body.isStar ? nil : distanceToSun,
             distanceToParentMeters: distanceToParent,
             orbitalPeriodSeconds: body.isStar ? nil : orbitalPeriod,
-            axialTiltDegrees: planetFacts?.axialTiltDegrees,
-            rotationPeriodHours: planetFacts?.rotationPeriodHours,
-            lengthOfDayHours: planetFacts?.lengthOfDayHours,
-            orbitalPeriodYears: planetFacts?.orbitalPeriodYears,
-            rotationDirection: planetFacts?.rotationDirection,
+            axialTiltDegrees: rotationFacts?.axialTiltDegrees,
+            rotationPeriodHours: rotationFacts?.rotationPeriodHours,
+            lengthOfDayHours: lengthOfDayHours,
+            lengthOfDayEarthDays: lengthOfDayHours.map { abs($0) / 24.0 },
+            orbitalPeriodYears: planetFacts?.orbitalPeriodYears ?? orbitalPeriod.map { $0 / SolarSystemConstants.secondsPerJulianYear },
+            rotationDirection: rotationFacts?.rotationDirection,
+            bodyClass: composition?.bodyClass,
+            primaryComposition: composition?.primaryComposition,
+            surfaceAreaSquareKilometers: surfaceAreaSquareKilometers(radiusMeters: body.visualRadius),
+            wikipediaURLString: WikipediaLinkCatalog.urlString(for: body.name),
             speedMetersPerSecond: speed,
             apsisPhase: apsisPhase(for: body, primary: parent ?? sun),
-            notes: nil
+            notes: noteText([composition?.sourceNote, rotationFacts?.sourceNote])
         )
     }
 
@@ -591,6 +646,9 @@ final class SimulationViewModel: ObservableObject {
             apsisPhase = futureDistanceToSun > distanceToSun ? .movingTowardAphelion : .movingTowardPerihelion
         }
 
+        let rotationFacts = RotationFactCatalog.byName[comet.name]
+        let composition = compositionFacts(for: comet.name, kind: .comet)
+
         return SelectedObjectInfo(
             id: comet.id,
             name: comet.name,
@@ -603,14 +661,19 @@ final class SimulationViewModel: ObservableObject {
             distanceToSunMeters: distanceToSun,
             distanceToParentMeters: nil,
             orbitalPeriodSeconds: orbitalPeriod,
-            axialTiltDegrees: nil,
-            rotationPeriodHours: nil,
-            lengthOfDayHours: nil,
-            orbitalPeriodYears: nil,
-            rotationDirection: nil,
+            axialTiltDegrees: rotationFacts?.axialTiltDegrees,
+            rotationPeriodHours: rotationFacts?.rotationPeriodHours,
+            lengthOfDayHours: rotationFacts?.rotationPeriodHours,
+            lengthOfDayEarthDays: rotationFacts?.rotationPeriodHours.map { abs($0) / 24.0 },
+            orbitalPeriodYears: comet.periodYears,
+            rotationDirection: rotationFacts?.rotationDirection,
+            bodyClass: composition?.bodyClass,
+            primaryComposition: composition?.primaryComposition,
+            surfaceAreaSquareKilometers: surfaceAreaSquareKilometers(radiusMeters: radius),
+            wikipediaURLString: WikipediaLinkCatalog.urlString(for: comet.name),
             speedMetersPerSecond: speed,
             apsisPhase: apsisPhase,
-            notes: [comet.notes, "Analytic visual comet; not N-body simulated."].compactMap { $0 }.joined(separator: " ")
+            notes: noteText([comet.notes, composition?.sourceNote, rotationFacts?.sourceNote])
         )
     }
 
@@ -635,6 +698,9 @@ final class SimulationViewModel: ObservableObject {
             apsisPhase = futureDistanceToSun > distanceToSun ? .movingTowardAphelion : .movingTowardPerihelion
         }
 
+        let rotationFacts = RotationFactCatalog.byName[minorBody.name]
+        let composition = compositionFacts(for: minorBody.name, kind: minorBody.kind)
+
         return SelectedObjectInfo(
             id: minorBody.id,
             name: minorBody.name,
@@ -647,38 +713,55 @@ final class SimulationViewModel: ObservableObject {
             distanceToSunMeters: distanceToSun,
             distanceToParentMeters: nil,
             orbitalPeriodSeconds: minorBody.orbitalPeriodSeconds,
-            axialTiltDegrees: nil,
-            rotationPeriodHours: nil,
-            lengthOfDayHours: nil,
-            orbitalPeriodYears: nil,
-            rotationDirection: nil,
+            axialTiltDegrees: rotationFacts?.axialTiltDegrees,
+            rotationPeriodHours: rotationFacts?.rotationPeriodHours,
+            lengthOfDayHours: rotationFacts?.rotationPeriodHours,
+            lengthOfDayEarthDays: rotationFacts?.rotationPeriodHours.map { abs($0) / 24.0 },
+            orbitalPeriodYears: minorBody.orbitalPeriodYears,
+            rotationDirection: rotationFacts?.rotationDirection,
+            bodyClass: composition?.bodyClass,
+            primaryComposition: composition?.primaryComposition,
+            surfaceAreaSquareKilometers: minorBody.meanRadiusMeters.flatMap(surfaceAreaSquareKilometers),
+            wikipediaURLString: WikipediaLinkCatalog.urlString(for: minorBody.name),
             speedMetersPerSecond: speed,
             apsisPhase: apsisPhase,
-            notes: [minorBody.notes, "Analytic visual object; not N-body simulated."].compactMap { $0 }.joined(separator: " ")
+            notes: noteText([minorBody.notes, composition?.sourceNote, rotationFacts?.sourceNote, "Analytic visual object; not N-body simulated."])
         )
     }
 
-    private func makeAsteroidBeltInfo() -> SelectedObjectInfo {
-        SelectedObjectInfo(
-            id: asteroidBeltSelectionID,
-            name: "Asteroid Belt",
-            kind: .asteroidBelt,
+    private func makeAggregateBeltInfo(
+        name: String,
+        kind: CelestialObjectKind,
+        distanceRangeAU: String,
+        distanceToSunAU: Double,
+        notes: String
+    ) -> SelectedObjectInfo {
+        let composition = compositionFacts(for: name, kind: kind)
+        return SelectedObjectInfo(
+            id: aggregateSelectionID(for: name),
+            name: name,
+            kind: kind,
             parentName: "Sun",
             dateText: currentSimulationDateText,
             massKg: nil,
             radiusMeters: nil,
             circumferenceMeters: nil,
-            distanceToSunMeters: 2.7 * SolarSystemConstants.astronomicalUnit,
+            distanceToSunMeters: distanceToSunAU * SolarSystemConstants.astronomicalUnit,
             distanceToParentMeters: nil,
             orbitalPeriodSeconds: nil,
             axialTiltDegrees: nil,
             rotationPeriodHours: nil,
             lengthOfDayHours: nil,
+            lengthOfDayEarthDays: nil,
             orbitalPeriodYears: nil,
             rotationDirection: nil,
+            bodyClass: composition?.bodyClass,
+            primaryComposition: composition?.primaryComposition,
+            surfaceAreaSquareKilometers: nil,
+            wikipediaURLString: WikipediaLinkCatalog.urlString(for: name),
             speedMetersPerSecond: nil,
             apsisPhase: .notApplicable,
-            notes: "Aesthetic asteroid field; not N-body simulated. Individual asteroids use analytic visual orbits."
+            notes: "Distance range: \(distanceRangeAU). \(notes)"
         )
     }
 
@@ -737,6 +820,51 @@ final class SimulationViewModel: ObservableObject {
             return ["Hygiea"]
         default:
             return []
+        }
+    }
+
+    private func rotationFacts(for body: CelestialBody, orbitalPeriodSeconds: Double?) -> RotationFacts? {
+        if let facts = RotationFactCatalog.byName[body.name] {
+            return facts
+        }
+
+        if body.isMoon, let orbitalPeriodSeconds {
+            return RotationFacts(
+                rotationPeriodHours: orbitalPeriodSeconds / 3_600,
+                axialTiltDegrees: nil,
+                isRetrograde: false,
+                sourceNote: "Synchronous rotation / tidally locked approximation."
+            )
+        }
+
+        return nil
+    }
+
+    private func compositionFacts(for name: String, kind: CelestialObjectKind) -> BodyCompositionFacts? {
+        PlanetCompositionCatalog.byName[name] ?? PlanetCompositionCatalog.fallback(for: kind)
+    }
+
+    private func surfaceAreaSquareKilometers(radiusMeters: Double) -> Double {
+        4 * Double.pi * pow(radiusMeters / 1_000, 2)
+    }
+
+    private func noteText(_ notes: [String?]) -> String? {
+        let compacted = notes.compactMap { note -> String? in
+            guard let note, !note.isEmpty else { return nil }
+            return note
+        }
+
+        return compacted.isEmpty ? nil : compacted.joined(separator: " ")
+    }
+
+    private func aggregateSelectionID(for name: String) -> UUID {
+        switch name {
+        case "Kuiper Belt":
+            return kuiperBeltSelectionID
+        case "Oort Cloud":
+            return oortCloudSelectionID
+        default:
+            return asteroidBeltSelectionID
         }
     }
 

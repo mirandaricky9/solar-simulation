@@ -23,6 +23,10 @@ extension CelestialObjectKind {
             return 5
         case .asteroidBelt:
             return 6
+        case .kuiperBelt:
+            return 7
+        case .oortCloud:
+            return 8
         case .unknown:
             return 99
         }

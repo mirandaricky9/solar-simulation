@@ -105,6 +105,26 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     )
     private var asteroidVariantInstanceCounts = Array(repeating: 0, count: MetalRenderer.asteroidVariantCount)
 
+    private var kuiperVariantInstanceBuffers = Array(
+        repeating: Array<MTLBuffer?>(repeating: nil, count: MetalRenderer.dynamicBufferCount),
+        count: MetalRenderer.asteroidVariantCount
+    )
+    private var kuiperVariantInstanceCapacities = Array(
+        repeating: Array(repeating: 0, count: MetalRenderer.dynamicBufferCount),
+        count: MetalRenderer.asteroidVariantCount
+    )
+    private var kuiperVariantInstanceCounts = Array(repeating: 0, count: MetalRenderer.asteroidVariantCount)
+
+    private var oortVariantInstanceBuffers = Array(
+        repeating: Array<MTLBuffer?>(repeating: nil, count: MetalRenderer.dynamicBufferCount),
+        count: MetalRenderer.asteroidVariantCount
+    )
+    private var oortVariantInstanceCapacities = Array(
+        repeating: Array(repeating: 0, count: MetalRenderer.dynamicBufferCount),
+        count: MetalRenderer.asteroidVariantCount
+    )
+    private var oortVariantInstanceCounts = Array(repeating: 0, count: MetalRenderer.asteroidVariantCount)
+
     private var minorDwarfPlanetInstanceBuffers = Array<MTLBuffer?>(repeating: nil, count: MetalRenderer.dynamicBufferCount)
     private var minorDwarfPlanetInstanceCapacities = Array(repeating: 0, count: MetalRenderer.dynamicBufferCount)
     private var minorDwarfPlanetInstanceTextureNames: [String] = []
@@ -201,6 +221,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     private let moonRadiusScale: Float = 0.06
     private let compactScaleMultiplier: Float = 1.35
     private let realisticScaleMultiplier: Float = 0.45
+    private let trueScaleRadiusMultiplier: Float = 1.0
     private let zoomRadiusFalloff: Float = 0.08
     private let orbitRingSegmentCount = 512
 
@@ -506,6 +527,16 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
                 ? viewModel.notableAsteroidVisualInstancesForRendering()
                 : []
             updateAsteroidInstances(from: viewModel.asteroidField, currentTime: viewModel.currentTime)
+            if viewModel.showKuiperBelt {
+                updateKuiperBeltInstances(from: viewModel.kuiperBeltField, currentTime: viewModel.currentTime)
+            } else {
+                kuiperVariantInstanceCounts = Array(repeating: 0, count: Self.asteroidVariantCount)
+            }
+            if viewModel.showOortCloud {
+                updateOortCloudInstances(from: viewModel.oortCloudField)
+            } else {
+                oortVariantInstanceCounts = Array(repeating: 0, count: Self.asteroidVariantCount)
+            }
             updateMinorBodyInstances(dwarfPlanets: dwarfPlanetInstances, notableAsteroids: notableAsteroidInstances)
             updateCometInstances(from: cometInstances)
             rebuildPickableObjects(
@@ -517,6 +548,8 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             updateCameraLockTargetIfNeeded()
         } else {
             asteroidVariantInstanceCounts = Array(repeating: 0, count: Self.asteroidVariantCount)
+            kuiperVariantInstanceCounts = Array(repeating: 0, count: Self.asteroidVariantCount)
+            oortVariantInstanceCounts = Array(repeating: 0, count: Self.asteroidVariantCount)
             minorDwarfPlanetInstanceCount = 0
             minorAsteroidVariantInstanceCounts = Array(repeating: 0, count: Self.asteroidVariantCount)
             updateCometInstances(from: [])
@@ -914,16 +947,41 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     }
 
     private func spinTilt(for body: CelestialBody) -> SIMD4<Float> {
-        guard body.kind == .planet,
-              let facts = PlanetFactCatalog.byName[body.name],
-              facts.rotationPeriodSeconds > 0 else {
+        if let facts = RotationFactCatalog.byName[body.name] {
+            return spinTilt(for: facts)
+        }
+
+        if body.isMoon, let orbitalPeriodSeconds = body.orbitalPeriodSeconds, orbitalPeriodSeconds > 0 {
+            let facts = RotationFacts(
+                rotationPeriodHours: orbitalPeriodSeconds / 3_600,
+                axialTiltDegrees: nil,
+                isRetrograde: false,
+                sourceNote: "Synchronous rotation / tidally locked approximation."
+            )
+            return spinTilt(for: facts)
+        }
+
+        return SIMD4<Float>(0, 0, 0, 0)
+    }
+
+    private func spinTilt(for objectName: String) -> SIMD4<Float> {
+        guard let facts = RotationFactCatalog.byName[objectName] else {
+            return SIMD4<Float>(0, 0, 0, 0)
+        }
+
+        return spinTilt(for: facts)
+    }
+
+    private func spinTilt(for facts: RotationFacts) -> SIMD4<Float> {
+        guard let rotationPeriodSeconds = facts.rotationPeriodSeconds,
+              rotationPeriodSeconds > 0 else {
             return SIMD4<Float>(0, 0, 0, 0)
         }
 
         let elapsedTime = viewModel?.currentTime ?? 0
-        let direction = facts.isRetrogradeRotation ? -1.0 : 1.0
-        let angle = Float(direction * 2.0 * Double.pi * elapsedTime / facts.rotationPeriodSeconds)
-        let axialTilt = Float(facts.axialTiltDegrees * Double.pi / 180.0)
+        let direction = facts.isRetrograde ? -1.0 : 1.0
+        let angle = Float(direction * 2.0 * Double.pi * elapsedTime / rotationPeriodSeconds)
+        let axialTilt = Float((facts.axialTiltDegrees ?? 0) * Double.pi / 180.0)
         return SIMD4<Float>(angle, axialTilt, 0, 1)
     }
 
@@ -1014,6 +1072,32 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             )
         }
 
+        if viewModel.showKuiperBelt {
+            objects.append(
+                PickableObject(
+                    id: UUID(uuidString: "AEF10CF5-D9D2-43A2-B1E2-504A94A5D7F1")!,
+                    name: "Kuiper Belt",
+                    kind: .kuiperBelt,
+                    worldPositionAU: SIMD3<Float>(42, 0, 0),
+                    renderRadiusAU: 4.0,
+                    priority: pickPriority(for: .kuiperBelt)
+                )
+            )
+        }
+
+        if viewModel.showOortCloud {
+            objects.append(
+                PickableObject(
+                    id: UUID(uuidString: "BB08BF9D-B33A-4669-A79E-0E683449B3A1")!,
+                    name: "Oort Cloud",
+                    kind: .oortCloud,
+                    worldPositionAU: SIMD3<Float>(0, 0, 0),
+                    renderRadiusAU: 90,
+                    priority: pickPriority(for: .oortCloud)
+                )
+            )
+        }
+
         pickableObjects = objects
     }
 
@@ -1086,6 +1170,10 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         position: SIMD3<Double>,
         parent: CelestialBody
     ) -> SIMD3<Float> {
+        if currentScaleMode == .trueScale {
+            return toRenderPosition(position)
+        }
+
         let parentRenderPosition = toRenderPosition(parent)
         let actualMoonRenderPosition = toRenderPosition(position)
         let offset = actualMoonRenderPosition - parentRenderPosition
@@ -1135,7 +1223,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             return 80
         case .star:
             return 10
-        case .asteroidBelt:
+        case .asteroidBelt, .kuiperBelt, .oortCloud:
             return 1
         case .asteroid:
             return 1
@@ -1156,6 +1244,10 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             return 10
         case .asteroidBelt:
             return 18
+        case .kuiperBelt:
+            return 16
+        case .oortCloud:
+            return 14
         case .asteroid:
             return 8
         case .unknown:
@@ -1165,8 +1257,10 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
 
     private func maximumPickRadius(for kind: CelestialObjectKind) -> Float {
         switch kind {
-        case .asteroidBelt:
+        case .asteroidBelt, .kuiperBelt:
             return 90
+        case .oortCloud:
+            return 120
         case .star:
             return 70
         default:
@@ -1257,8 +1351,6 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             )
         }
 
-        let radiusScale = bodySizeMultiplier / pow(max(zoom, 1.0), zoomRadiusFalloff)
-
         if let dwarfPointer = minorDwarfPlanetInstanceBuffers[dynamicBufferIndex]?.contents().bindMemory(
             to: BodyInstance.self,
             capacity: minorDwarfPlanetInstanceCapacities[dynamicBufferIndex]
@@ -1266,9 +1358,13 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             for index in dwarfPlanets.indices {
                 let instance = dwarfPlanets[index]
                 dwarfPointer[index] = BodyInstance(
-                    positionRadius: SIMD4<Float>(instance.positionAU, instance.renderRadiusAU * radiusScale),
+                    positionRadius: SIMD4<Float>(
+                        instance.positionAU,
+                        visualRadius(for: instance.definition, enhancedRadiusAU: instance.renderRadiusAU)
+                    ),
                     color: instance.color,
-                    material: SIMD4<Float>(0, hasTexture(forBodyName: instance.definition.name) ? 1 : 0, 0, 0)
+                    material: SIMD4<Float>(0, hasTexture(forBodyName: instance.definition.name) ? 1 : 0, 0, 0),
+                    spinTilt: spinTilt(for: instance.definition.name)
                 )
                 minorDwarfPlanetInstanceTextureNames.append(instance.definition.name)
             }
@@ -1288,9 +1384,13 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             let index = writeIndices[variant]
             writeIndices[variant] += 1
             pointers[variant]?[index] = BodyInstance(
-                positionRadius: SIMD4<Float>(asteroid.positionAU, asteroid.renderRadiusAU * radiusScale),
+                positionRadius: SIMD4<Float>(
+                    asteroid.positionAU,
+                    visualRadius(for: asteroid.definition, enhancedRadiusAU: asteroid.renderRadiusAU)
+                ),
                 color: asteroid.color,
-                material: SIMD4<Float>(0, 0, 0, 0)
+                material: SIMD4<Float>(0, 0, 0, 0),
+                spinTilt: spinTilt(for: asteroid.definition.name)
             )
         }
     }
@@ -1357,6 +1457,102 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         return SIMD3<Float>(Float(x), Float(y), Float(inclinedZ + verticalWave))
     }
 
+    private func updateKuiperBeltInstances(from field: KuiperBeltVisualField, currentTime: Double) {
+        kuiperVariantInstanceCounts = Array(repeating: 0, count: Self.asteroidVariantCount)
+        guard !field.objects.isEmpty else { return }
+
+        for object in field.objects {
+            kuiperVariantInstanceCounts[clampedAsteroidVariant(object.meshVariant)] += 1
+        }
+
+        for variant in 0..<Self.asteroidVariantCount where kuiperVariantInstanceCounts[variant] > 0 {
+            Self.ensureBodyInstanceBuffer(
+                device: device,
+                buffers: &kuiperVariantInstanceBuffers[variant],
+                capacities: &kuiperVariantInstanceCapacities[variant],
+                bufferIndex: dynamicBufferIndex,
+                requiredCount: kuiperVariantInstanceCounts[variant],
+                label: "Kuiper Belt Variant \(variant) Instance Buffer"
+            )
+        }
+
+        var pointers = Array<UnsafeMutablePointer<BodyInstance>?>(repeating: nil, count: Self.asteroidVariantCount)
+        for variant in 0..<Self.asteroidVariantCount where kuiperVariantInstanceCounts[variant] > 0 {
+            pointers[variant] = kuiperVariantInstanceBuffers[variant][dynamicBufferIndex]?.contents().bindMemory(
+                to: BodyInstance.self,
+                capacity: kuiperVariantInstanceCapacities[variant][dynamicBufferIndex]
+            )
+        }
+
+        var writeIndices = Array(repeating: 0, count: Self.asteroidVariantCount)
+        let radiusScale = bodySizeMultiplier / pow(max(zoom, 1.0), zoomRadiusFalloff)
+
+        for object in field.objects {
+            let variant = clampedAsteroidVariant(object.meshVariant)
+            let index = writeIndices[variant]
+            writeIndices[variant] += 1
+            pointers[variant]?[index] = BodyInstance(
+                positionRadius: SIMD4<Float>(kuiperPosition(for: object, currentTime: currentTime), object.sizeAU * radiusScale),
+                color: object.color,
+                material: SIMD4<Float>(0, 0, 0, 0)
+            )
+        }
+    }
+
+    private func kuiperPosition(for object: KuiperBeltVisualInstance, currentTime: Double) -> SIMD3<Float> {
+        let angle = Double(object.initialAngle) + Double(object.angularSpeed) * currentTime
+        let radius = Double(object.orbitRadiusAU) * (1 - Double(object.eccentricity) * cos(angle))
+        let inclination = Double(object.inclination)
+        let x = cos(angle) * radius
+        let flatY = sin(angle) * radius
+        let y = flatY * cos(inclination)
+        let z = flatY * sin(inclination) + Double(object.verticalOffsetAU)
+        return SIMD3<Float>(Float(x), Float(y), Float(z))
+    }
+
+    private func updateOortCloudInstances(from field: OortCloudVisualField) {
+        oortVariantInstanceCounts = Array(repeating: 0, count: Self.asteroidVariantCount)
+        guard !field.objects.isEmpty else { return }
+
+        for object in field.objects {
+            oortVariantInstanceCounts[clampedAsteroidVariant(object.meshVariant)] += 1
+        }
+
+        for variant in 0..<Self.asteroidVariantCount where oortVariantInstanceCounts[variant] > 0 {
+            Self.ensureBodyInstanceBuffer(
+                device: device,
+                buffers: &oortVariantInstanceBuffers[variant],
+                capacities: &oortVariantInstanceCapacities[variant],
+                bufferIndex: dynamicBufferIndex,
+                requiredCount: oortVariantInstanceCounts[variant],
+                label: "Oort Cloud Variant \(variant) Instance Buffer"
+            )
+        }
+
+        var pointers = Array<UnsafeMutablePointer<BodyInstance>?>(repeating: nil, count: Self.asteroidVariantCount)
+        for variant in 0..<Self.asteroidVariantCount where oortVariantInstanceCounts[variant] > 0 {
+            pointers[variant] = oortVariantInstanceBuffers[variant][dynamicBufferIndex]?.contents().bindMemory(
+                to: BodyInstance.self,
+                capacity: oortVariantInstanceCapacities[variant][dynamicBufferIndex]
+            )
+        }
+
+        var writeIndices = Array(repeating: 0, count: Self.asteroidVariantCount)
+        let radiusScale = bodySizeMultiplier / pow(max(zoom, 1.0), zoomRadiusFalloff)
+        let compression: Float = currentScaleMode == .trueScale ? 1 : 0.02
+
+        for object in field.objects {
+            let variant = clampedAsteroidVariant(object.meshVariant)
+            let index = writeIndices[variant]
+            writeIndices[variant] += 1
+            pointers[variant]?[index] = BodyInstance(
+                positionRadius: SIMD4<Float>(object.positionAU * compression, object.sizeAU * radiusScale),
+                color: object.color,
+                material: SIMD4<Float>(0, 0, 0, 0)
+            )
+        }
+    }
+
     private func clampedAsteroidVariant(_ variant: Int) -> Int {
         min(max(variant, 0), Self.asteroidVariantCount - 1)
     }
@@ -1404,10 +1600,11 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
                 nucleusPointer[index] = BodyInstance(
                     positionRadius: SIMD4<Float>(
                         instance.positionAU,
-                        instance.nucleusRadiusAU * radiusScale
+                        visualCometNucleusRadius(for: instance) * radiusScale
                     ),
                     color: SIMD4<Float>(0.55, 0.53, 0.49, 1),
-                    material: SIMD4<Float>(0, 0, 0, 0)
+                    material: SIMD4<Float>(0, 0, 0, 0),
+                    spinTilt: spinTilt(for: instance.definition.name)
                 )
             }
         }
@@ -1670,6 +1867,22 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
                 instanceBuffer: minorAsteroidVariantInstanceBuffers[variant][dynamicBufferIndex],
                 instanceCount: minorAsteroidVariantInstanceCounts[variant]
             )
+            drawInstancedBodies(
+                encoder: encoder,
+                vertexBuffer: mesh.vertexBuffer,
+                indexBuffer: mesh.indexBuffer,
+                indexCount: mesh.indexCount,
+                instanceBuffer: kuiperVariantInstanceBuffers[variant][dynamicBufferIndex],
+                instanceCount: kuiperVariantInstanceCounts[variant]
+            )
+            drawInstancedBodies(
+                encoder: encoder,
+                vertexBuffer: mesh.vertexBuffer,
+                indexBuffer: mesh.indexBuffer,
+                indexCount: mesh.indexCount,
+                instanceBuffer: oortVariantInstanceBuffers[variant][dynamicBufferIndex],
+                instanceCount: oortVariantInstanceCounts[variant]
+            )
         }
 
         if let cometMesh = asteroidMeshVariants.first {
@@ -1877,6 +2090,10 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     }
 
     private func visualRadius(for body: CelestialBody) -> Float {
+        if currentScaleMode == .trueScale {
+            return Float(body.visualRadius / SolarSystemConstants.astronomicalUnit) * trueScaleRadiusMultiplier * bodySizeMultiplier
+        }
+
         let baseRadius: Float
 
         if body.isStar {
@@ -1891,10 +2108,26 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             baseRadius = max(minimumPlanetVisualRadiusAU, scaled)
         }
 
-        return (baseRadius * scaleModeMultiplier * bodySizeMultiplier) / pow(max(zoom, 1.0), zoomRadiusFalloff)
+        return (baseRadius * enhancedScaleModeMultiplier * bodySizeMultiplier) / pow(max(zoom, 1.0), zoomRadiusFalloff)
     }
 
-    private var scaleModeMultiplier: Float {
+    private func visualRadius(for definition: MinorBodyDefinition, enhancedRadiusAU: Float) -> Float {
+        if currentScaleMode == .trueScale, let radiusMeters = definition.meanRadiusMeters {
+            return Float(radiusMeters / SolarSystemConstants.astronomicalUnit) * trueScaleRadiusMultiplier * bodySizeMultiplier
+        }
+
+        return (enhancedRadiusAU * bodySizeMultiplier) / pow(max(zoom, 1.0), zoomRadiusFalloff)
+    }
+
+    private func visualCometNucleusRadius(for instance: CometVisualInstance) -> Float {
+        instance.nucleusRadiusAU
+    }
+
+    private var currentScaleMode: SimulationScaleMode {
+        viewModel?.scaleMode ?? .enhanced
+    }
+
+    private var enhancedScaleModeMultiplier: Float {
         switch scaleMode {
         case .compact:
             compactScaleMultiplier
@@ -1980,7 +2213,7 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
             fieldOfViewY: effectiveFieldOfView,
             aspect: aspect,
             near: 0.01,
-            far: 5_000
+            far: 150_000
         )
 
         worldViewProjectionMatrix = projectionMatrix * viewMatrix

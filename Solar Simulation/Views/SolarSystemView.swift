@@ -3,6 +3,7 @@ import SwiftUI
 struct SolarSystemView: View {
     @ObservedObject var viewModel: SimulationViewModel
     @State private var isSideMenuVisible = true
+    @State private var isRightInfoSidebarVisible = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -17,33 +18,20 @@ struct SolarSystemView: View {
                 ZStack(alignment: .topTrailing) {
                     SimulationViewContainer(viewModel: viewModel)
 
-                    if !isSideMenuVisible {
-                        VStack {
-                            HStack {
-                                Button {
-                                    isSideMenuVisible = true
-                                } label: {
-                                    Label("Show Menu", systemImage: "sidebar.left")
-                                }
-                                .padding(8)
-                                .background(.regularMaterial)
-                                .clipShape(RoundedRectangle(cornerRadius: 8))
-                                .help("Show side menu")
+                    overlayControls
+                }
 
-                                Spacer()
-                            }
-
-                            Spacer()
-                        }
-                        .padding()
-                    }
-
-                    if let info = viewModel.selectedObjectInfo {
-                        SelectedObjectInfoPanel(info: info) {
+                if isRightInfoSidebarVisible {
+                    ObjectInfoSidebar(
+                        info: viewModel.selectedObjectInfo,
+                        onClearSelection: {
                             viewModel.clearSelection()
+                        },
+                        onHide: {
+                            isRightInfoSidebarVisible = false
                         }
-                        .padding()
-                    }
+                    )
+                    .transition(.move(edge: .trailing))
                 }
             }
             .frame(minWidth: 900, minHeight: 650)
@@ -52,5 +40,40 @@ struct SolarSystemView: View {
 
             ControlPanel(viewModel: viewModel)
         }
+    }
+
+    private var overlayControls: some View {
+        VStack {
+            HStack {
+                if !isSideMenuVisible {
+                    Button {
+                        isSideMenuVisible = true
+                    } label: {
+                        Label("Show Menu", systemImage: "sidebar.left")
+                    }
+                    .padding(8)
+                    .background(.regularMaterial)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .help("Show side menu")
+                }
+
+                Spacer()
+
+                if !isRightInfoSidebarVisible {
+                    Button {
+                        isRightInfoSidebarVisible = true
+                    } label: {
+                        Label("Show Info", systemImage: "sidebar.right")
+                    }
+                    .padding(8)
+                    .background(.regularMaterial)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .help("Show object info")
+                }
+            }
+
+            Spacer()
+        }
+        .padding()
     }
 }

@@ -65,3 +65,31 @@ International. The Pluto map is from NASA/Wikimedia Commons public-domain imager
 Recommended public/free sources for future texture updates include NASA 3D Resources,
 NASA Solar System Treks, USGS Astrogeology planetary maps, and Solar System Scope
 textures under CC BY 4.0.
+
+## Scale modes
+The renderer supports two visual scale modes. Enhanced scale keeps the existing
+educational body exaggeration so planets, moons, and small bodies remain readable.
+True Scale uses physical radii converted to AU with a uniform radius multiplier, so
+relative size differences are preserved and planets may be tiny unless the camera is
+zoomed in.
+
+## Rotation and object facts
+Planet spin, axial tilt, day, and year metadata use NASA/JPL Solar System Dynamics and
+NASA Planetary Fact Sheet style values. Moon spin is modeled as synchronous rotation
+where that is a safe approximation. Dwarf planet, asteroid, and comet spin is only
+applied where the project has an approximate known value; otherwise the object remains
+non-spinning rather than presenting invented facts.
+
+Selected-object details now live in the expandable right-hand info sidebar. The sidebar
+groups orbit, rotation, physical facts, notes, and Wikipedia links when a page mapping
+is available.
+
+## Visual-only distant object fields
+The asteroid belt, Kuiper Belt, and Oort Cloud layers are visual-only fields. They are
+not `CelestialBody` objects, do not participate in N-body physics, do not store trails,
+and are rendered from reusable Metal instance buffers.
+
+The Kuiper Belt layer represents an icy trans-Neptunian disk from roughly 30 to 55 AU.
+The Oort Cloud layer represents a theoretical distant spherical shell from roughly
+5,000 to 100,000 AU. In Enhanced scale the Oort Cloud is visually compressed so it can
+be inspected; in True Scale it remains extremely distant from the planetary system.

@@ -61,6 +61,20 @@ struct SimulationSideMenu: View {
 
             DisclosureGroup("Camera", isExpanded: $showCameraControls) {
                 VStack(alignment: .leading, spacing: 8) {
+                    Picker("Scale", selection: $viewModel.scaleMode) {
+                        ForEach(SimulationScaleMode.allCases) { mode in
+                            Text(mode.rawValue).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
+                    Text("True Scale preserves relative body sizes; planets may be tiny unless zoomed in.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Divider()
+
                     Text("Lock Onto")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -158,6 +172,8 @@ struct SimulationSideMenu: View {
                     Toggle("Dwarf Planets", isOn: $viewModel.showDwarfPlanets)
                     Toggle("Notable Asteroids", isOn: $viewModel.showNotableAsteroids)
                     Toggle("Comets", isOn: $viewModel.showComets)
+                    Toggle("Kuiper Belt", isOn: $viewModel.showKuiperBelt)
+                    Toggle("Oort Cloud", isOn: $viewModel.showOortCloud)
                 }
                 .padding(.leading, 8)
                 .padding(.top, 6)
